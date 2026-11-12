@@ -17,7 +17,7 @@ from jef.chats import Chats, ChatError, Status
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
 from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError
-from jef.projects import StartError, gh_clone, load_project, start_project
+from jef.projects import StartError, gh_clone, known_repos, load_project, parse_repo, projects_on_repo, start_project
 from jef.tasks import TaskList, TaskStatus
 from jef.workspace import Workspace
 
@@ -130,6 +130,12 @@ def create_app(
         item = find_item(number)
         if item is None:
             return RedirectResponse("/", status_code=303)
+        repos = known_repos(ws)
+        chosen = repo or (repos[0] if repos else "")
+        try:
+            others = projects_on_repo(ws, parse_repo(chosen)) if chosen else []
+        except StartError:
+            others = []
         return TEMPLATES.TemplateResponse(
             request,
             "start.html",
@@ -139,7 +145,9 @@ def create_app(
                 "started": item.status is not BacklogStatus.WAITING,
                 "github": github_check(),
                 "claude_ok": get_chats() is not None,
-                "repo": repo,
+                "repo": chosen,
+                "known_repos": repos,
+                "others": others,
                 "error": error,
             },
         )
