@@ -28,6 +28,13 @@ def test_home_page_shows_empty_states(client):
     assert "No plan usage seen yet" in page.text
 
 
+def test_pages_use_an_emoji_as_the_tab_icon(client):
+    for path in ("/", "/settings"):
+        page = client.get(path).text
+        assert '<link rel="icon" href="data:image/svg+xml,' in page
+        assert "🏭" in page
+
+
 def test_adding_a_backlog_item_saves_it_and_shows_it(ws, client):
     response = client.post("/backlog", data={"feature": "Weekly email summary"})
     assert response.status_code == 200  # followed the redirect back home
