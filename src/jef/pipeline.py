@@ -75,7 +75,8 @@ MAX_READ_CHARS = 12_000
 PR_BLOCK = re.compile(r"```pr\s*\n(.*?)```", re.S | re.I)
 BUDGET_PROBLEM = "Budget reached"  # how a budget pause starts, so raising the budget can lift it
 MAX_BUDGET_USD = 100_000
-IN_FLIGHT = (TaskStatus.IMPLEMENTATION, TaskStatus.PENDING_REVIEW)
+# Only tasks being built count toward "Implementers at once"; a PR waiting for review doesn't.
+BUILDING = (TaskStatus.IMPLEMENTATION,)
 
 
 class PipelineError(RuntimeError):
@@ -109,13 +110,13 @@ def _short(text: str, limit: int = 160) -> str:
 
 
 def _at_limit(numbers: list[int], limit: int) -> str:
-    """Why another task can't start: "Tasks 1 and 2 aren't merged yet, …"."""
+    """Why another task can't start: "Tasks 1 and 2 are still being built, …"."""
     if len(numbers) == 1:
-        busy = f"Task {numbers[0]} isn't"
+        busy, its = f"Task {numbers[0]} is", "its PR is"
     else:
-        busy = "Tasks " + ", ".join(map(str, numbers[:-1])) + f" and {numbers[-1]} aren't"
+        busy, its = "Tasks " + ", ".join(map(str, numbers[:-1])) + f" and {numbers[-1]} are", "one of their PRs is"
     at_most = "builds 1 task" if limit == 1 else f"builds at most {limit} tasks"
-    return f"{busy} merged yet, and this project {at_most} at a time."
+    return f"{busy} still being built, and this project {at_most} at a time. Start the next one once {its} open."
 
 
 def _tail(text: str, limit: int = MAX_CONTEXT_CHARS) -> str:
@@ -467,7 +468,7 @@ class Pipeline:
                 raise PipelineError(f"There's no task {number}. See `jef overview`.")
             if task.status is not TaskStatus.NOT_STARTED:
                 raise PipelineError(f"Task {number} has already started ({task.status.value}).")
-            busy = [t for t in tasks.tasks if t.status in IN_FLIGHT]
+            busy = [t for t in tasks.tasks if t.status in BUILDING]
             limit = self.implementers_at_once(slug)
             if len(busy) >= limit:
                 raise PipelineError(_at_limit([t.number for t in busy], limit))
@@ -556,6 +557,8 @@ class Pipeline:
                     said += " (and left your note on it)"
                 except (PublishError, OSError, subprocess.SubprocessError) as err:
                     said += f" (couldn't leave the note: {err})"
+            if not updated and any(t.status is TaskStatus.NOT_STARTED for t in tasks.tasks):
+                said += ". You can start the next task now, unless it needs this one's code."
             self.write_status(slug)
             return said
 

@@ -91,7 +91,7 @@ A coordinator acts with its own `jef` commands, grouped by what they act on. The
 | `jef research start ["brief"]` | Starts the research agent |
 | `jef tasks set "Task" "Task" …` | Sets the task list. While building, it replaces only the tasks that haven't started |
 | `jef tasks approve` | Approves the list, only after it has waited a heartbeat for you and only if that's allowed for the project |
-| `jef task start N` | Starts task N's implementer, if the project has fewer unmerged tasks than it builds at once |
+| `jef task start N` | Starts task N's implementer, if the project has fewer tasks being built than it builds at once (a task whose PR is open doesn't count) |
 | `jef agent send impl-2 "…"` | Messages one of its own agents |
 | `jef task publish N [--note …]` | Jef checks the commits for secrets, pushes the branch and opens the PR, or updates the open one (with the note as a comment) |
 | `jef prs check` | Asks GitHub about every PR: merged (recorded, implementer stopped), conflicts, closed |
@@ -108,13 +108,13 @@ A coordinator can't wake itself: each agent is a Claude Code session that only r
 - **straight away when one of its agents finishes a turn**, so it can read the reply and act,
 - when you press **Approve**, **Start research**, **Try again** or **Ask the coordinator to check now**.
 
-Each wake-up says what changed and includes the project's status. On its heartbeat the coordinator nudges implementers that are still working, runs `jef prs check` to check merges and conflicts, and starts the next tasks when the ones they need have merged. Heartbeats cost a coordinator turn each, so don't set the interval too short.
+Each wake-up says what changed and includes the project's status. On its heartbeat the coordinator nudges implementers that are still working, runs `jef prs check` to check merges and conflicts, and starts the next tasks: as soon as the last one's PR is open, or, for a task that needs another one's code, once that PR has merged. Heartbeats cost a coordinator turn each, so don't set the interval too short.
 
 Besides that, Jef only reads files: every half minute it saves finished research as `research.md` and updates each project's `status.md`. That costs nothing. **Check status now** on the project page does the same straight away.
 
 To see every project at once, press **Read status** above the Projects table on the home page. It rewrites each project's `status.md` from Jef's own files and shows each project's stage and its coordinator's state. It makes no AI or GitHub calls. You can also read one project's file at `/projects/<slug>/status`, or on its page under Status file.
 
-By default tasks are built **one at a time**, because they usually build on each other. To build faster, raise **Implementers at once** on the project page (up to 5). The coordinator then starts tasks that don't depend on each other side by side; a task that needs another one's code still waits until that PR is merged, because every implementer starts from the latest `main`. More at once means faster progress, but also faster spending and more merge conflicts. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
+By default tasks are built **one at a time**, because they usually build on each other. Only tasks being built count: once a task's PR is open, the coordinator can start the next one that doesn't need its code, without waiting for you to merge. To build faster, raise **Implementers at once** on the project page (up to 5). The coordinator then starts tasks that don't depend on each other side by side; a task that needs another one's code still waits until that PR is merged, because every implementer starts from the latest `main`. More at once means faster progress, but also faster spending and more merge conflicts. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
 
 ### The whole loop
 
