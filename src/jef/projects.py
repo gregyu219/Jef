@@ -37,6 +37,10 @@ COORDINATOR_NAMES = [
 ]
 
 DEFAULT_HEARTBEAT_MINUTES = 60
+# How many tasks a project may build side by side. One by default, since tasks
+# often build on each other; the person can raise it per project.
+DEFAULT_IMPLEMENTERS_AT_ONCE = 1
+MAX_IMPLEMENTERS_AT_ONCE = 5
 
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$")
 URL_PREFIXES = ("https://github.com/", "http://github.com/", "github.com/", "git@github.com:")
@@ -156,6 +160,15 @@ def goal_fields(ws: Workspace, slug: str) -> dict[str, str]:
             key, value = line[2:].split(":", 1)
             fields[key.strip().lower()] = value.strip()
     return fields
+
+
+def implementers_at_once(ws: Workspace, slug: str) -> int:
+    """How many tasks the project may build at once, from goal.md's
+    ``Implementers at once`` field, or the default if it's missing or odd."""
+    value = goal_fields(ws, slug).get("implementers at once", "")
+    if value.isdigit() and 1 <= int(value) <= MAX_IMPLEMENTERS_AT_ONCE:
+        return int(value)
+    return DEFAULT_IMPLEMENTERS_AT_ONCE
 
 
 def set_goal_field(ws: Workspace, slug: str, key: str, value: str) -> None:

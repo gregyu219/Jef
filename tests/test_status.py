@@ -86,6 +86,7 @@ def test_render_and_read_round_trip(ws):
         "coordinator note": "Approved the tasks",
         "problem": "none",
         "tasks": "1 of 3 merged",
+        "implementers at once": "1",
         "updated": "2026-11-11 14:05",
     }
     rows = mdtable.parse(text).rows

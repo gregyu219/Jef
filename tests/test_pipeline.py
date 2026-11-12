@@ -12,7 +12,7 @@ from jef.github import GitHubStatus
 from jef import coordinate, inbox, models
 from jef.pipeline import Heartbeat, Phase, Pipeline, PipelineError, last_reply, parse_pr, pr_label
 from jef.publish import PublishError
-from jef.projects import goal_fields, slugify, start_project
+from jef.projects import goal_fields, set_goal_field, slugify, start_project
 from jef.status import read_status, status_path
 from jef.tasks import TaskStatus
 from jef.usage import budget_left
@@ -478,6 +478,65 @@ def test_heartbeat_interval_is_per_project(w):
     assert goal_fields(w.ws, w.slug)["heartbeat"] == "15 minutes"
     with pytest.raises(PipelineError):
         w.pipeline.set_heartbeat_minutes(w.slug, 1)
+
+
+def test_implementers_at_once_is_per_project(w):
+    p = w.pipeline
+    assert p.implementers_at_once(w.slug) == 1
+    p.set_implementers_at_once(w.slug, 3)
+    assert p.implementers_at_once(w.slug) == 3
+    assert goal_fields(w.ws, w.slug)["implementers at once"] == "3"
+    for bad in (0, -1, 6):
+        with pytest.raises(PipelineError, match="between 1 and 5"):
+            p.set_implementers_at_once(w.slug, bad)
+    assert p.implementers_at_once(w.slug) == 3
+
+
+def test_odd_implementers_at_once_falls_back_to_one(w):
+    for odd in ("lots", "0", "9"):
+        set_goal_field(w.ws, w.slug, "Implementers at once", odd)
+        assert w.pipeline.implementers_at_once(w.slug) == 1
+
+
+def test_tasks_run_side_by_side_up_to_the_limit(w):
+    p, slug = w.pipeline, w.slug
+    tasks_waiting(w, ("A", "B", "C"))
+    p.set_implementers_at_once(slug, 2)
+    p.approve_tasks(slug)
+    p.tick(slug)
+    w.ok("start", number="1")
+    w.ok("start", number="2")
+    assert w.git.worktrees == [(f"jef/{slug}/task-1", "main"), (f"jef/{slug}/task-2", "main")]
+    assert w.agent("impl-1").status is Status.WORKING and w.agent("impl-2").status is Status.WORKING
+    assert w.refused("start", number="3") == "Tasks 1 and 2 aren't merged yet, and this project builds at most 2 tasks at a time."
+    w.reply("ada", "Started tasks 1 and 2.")
+
+    # Both finish while Ada is busy: she hears about both in one wake.
+    w.chats.send(slug, "ada", "how's it going?")
+    w.reply("impl-1", READY)
+    w.reply("impl-2", READY)
+    assert w.last_message("ada") == "how's it going?"
+    w.reply("ada", "Fine.")
+    wake = w.last_message("ada")
+    assert "impl-1 finished a turn" in wake and "impl-2 finished a turn" in wake
+    assert "- Implementers at once: 2" in wake
+    w.ok("publish", number="1")
+    w.ok("publish", number="2")
+    assert w.refused("start", number="3").startswith("Tasks 1 and 2 aren't merged yet")
+    w.reply("ada", "Opened both PRs.")
+
+    # One merges: there's room for task 3.
+    w.pr_states[PR20] = "MERGED"
+    w.ok("prs")
+    w.ok("start", number="3")
+    assert w.agent("impl-3").note == "Started by Ada after PR #20 merged"
+    assert [t.status for t in p.tasks(slug).tasks] == [TaskStatus.MERGED, TaskStatus.PENDING_REVIEW, TaskStatus.IMPLEMENTATION]
+
+
+def test_overview_shows_implementers_at_once(w):
+    w.pipeline.set_implementers_at_once(w.slug, 4)
+    w.pipeline.write_status(w.slug)
+    assert read_status(w.ws, w.slug)["implementers at once"] == "4"
 
 
 def test_models_are_per_project(w):
