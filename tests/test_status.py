@@ -5,7 +5,21 @@ import pytest
 from jef import mdtable
 from jef.chats import Agent, Role, Status
 from jef.projects import set_goal_field
-from jef.status import Phase, project_phase, read_status, render_status, status_path, write_status
+from jef.status import (
+    NEEDS_APPROVAL,
+    NEEDS_PROBLEM,
+    NEEDS_QUESTION,
+    NEEDS_REVIEW,
+    WAITING,
+    Attention,
+    Phase,
+    needs_you,
+    project_phase,
+    read_status,
+    render_status,
+    status_path,
+    write_status,
+)
 from jef.tasks import Task, TaskList, TaskStatus
 from jef.workspace import Workspace
 
@@ -111,3 +125,49 @@ def test_unchanged_status_is_not_rewritten(ws):
 def test_problem_is_shown(ws):
     set_goal_field(ws, SLUG, "Problem", "Couldn't start task 1: boom")
     assert "- Problem: Couldn't start task 1: boom" in render_status(ws, SLUG, [ada()], T1)
+
+
+PR = "https://github.com/o/r/pull/34"
+
+
+def test_needs_you_is_none_while_the_agents_work(ws):
+    set_goal_field(ws, SLUG, "Tasks approved", "yes")
+    save_tasks(ws, Task(1, "Show it", TaskStatus.IMPLEMENTATION, "impl-1"), Task(2, "Test it"))
+    assert needs_you(ws, SLUG, [ada()]) is None
+
+
+def test_needs_you_for_a_pr_to_review(ws):
+    set_goal_field(ws, SLUG, "Tasks approved", "yes")
+    save_tasks(ws, Task(1, "Show it", TaskStatus.MERGED, "impl-1", "https://github.com/o/r/pull/1"),
+               Task(2, "Test it", TaskStatus.PENDING_REVIEW, "impl-2", PR))
+    assert needs_you(ws, SLUG, [ada()]) == Attention(NEEDS_REVIEW, "Test it", link=PR)
+
+
+def test_needs_you_not_while_the_implementer_fixes_conflicts(ws):
+    set_goal_field(ws, SLUG, "Tasks approved", "yes")
+    save_tasks(ws, Task(1, "Show it", TaskStatus.PENDING_REVIEW, "impl-1", PR))
+    set_goal_field(ws, SLUG, "Conflict", "fixing 1")
+    assert needs_you(ws, SLUG, [ada()]) is None
+    set_goal_field(ws, SLUG, "Conflict", "asked 1")  # still yours to review
+    assert needs_you(ws, SLUG, [ada()]).reason == NEEDS_REVIEW
+
+
+def test_needs_you_for_a_question_or_a_problem(ws):
+    set_goal_field(ws, SLUG, "Tasks approved", "yes")
+    save_tasks(ws, Task(1, "Show it", TaskStatus.PENDING_REVIEW, "impl-1", PR))
+    set_goal_field(ws, SLUG, "Problem", f"Ada {WAITING}Which colour?")
+    assert needs_you(ws, SLUG, [ada()]) == Attention(NEEDS_QUESTION, "Which colour?")
+    set_goal_field(ws, SLUG, "Problem", "Couldn't start task 2: boom")
+    assert needs_you(ws, SLUG, [ada()]) == Attention(NEEDS_PROBLEM, "Couldn't start task 2: boom")
+
+
+def test_needs_you_to_approve_tasks(ws):
+    save_tasks(ws, Task(1, "Show it"))
+    assert needs_you(ws, SLUG, [ada()]) == Attention(NEEDS_APPROVAL)
+
+
+def test_needs_you_is_none_when_done_or_stopped(ws):
+    save_tasks(ws, Task(1, "Show it", TaskStatus.PENDING_REVIEW, "impl-1", PR))
+    assert needs_you(ws, SLUG, [ada(Status.STOPPED)]) is None
+    set_goal_field(ws, SLUG, "Done", "yes")
+    assert needs_you(ws, SLUG, [ada()]) is None

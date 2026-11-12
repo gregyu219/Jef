@@ -17,9 +17,9 @@ from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Agent, Chats, ChatError, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
-from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError
-from jef.projects import StartError, gh_clone, known_repos, load_project, parse_repo, projects_on_repo, start_project, used_backlog_numbers
-from jef.status import read_status, status_path, write_status
+from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError, pr_label
+from jef.projects import StartError, gh_clone, goal_fields, known_repos, load_project, parse_repo, projects_on_repo, start_project, used_backlog_numbers
+from jef.status import NEEDS_REVIEW, Attention, needs_you, read_status, status_path, write_status
 from jef.tasks import TaskList, TaskStatus
 from jef.usage import (
     Usage,
@@ -48,6 +48,7 @@ TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 TEMPLATES.env.filters["tokens"] = format_tokens
 TEMPLATES.env.filters["cost"] = format_cost
 TEMPLATES.env.filters["reset"] = format_reset
+TEMPLATES.env.filters["pr_label"] = pr_label
 
 
 @dataclass
@@ -111,6 +112,32 @@ def refresh_statuses(ws: Workspace, roster: Callable[[str], list[Agent]] | None 
         agents = roster(slug) if roster else load_roster(ws, slug)
         changed += write_status(ws, slug, agents)
     return changed
+
+
+def backlog_projects(ws: Workspace) -> dict[int, str]:
+    """Backlog item number -> the slug of the project started from it."""
+    found = {}
+    for slug in ws.project_slugs():
+        number = goal_fields(ws, slug).get("backlog item", "").lstrip("#").strip()
+        if number.isdigit():
+            found[int(number)] = slug
+    return found
+
+
+def backlog_attention(ws: Workspace, backlog: Backlog) -> dict[int, tuple[str, Attention]]:
+    """For each in-progress backlog item waiting on you: (its project's slug,
+    what it needs). Read from the project files on every page load, so it's
+    never stale and costs no LLM or GitHub call."""
+    slugs = backlog_projects(ws)
+    found = {}
+    for item in backlog.items:
+        slug = slugs.get(item.number)
+        if item.status is not BacklogStatus.IN_PROGRESS or slug is None:
+            continue
+        attention = needs_you(ws, slug, load_roster(ws, slug))
+        if attention is not None:
+            found[item.number] = (slug, attention)
+    return found
 
 
 def ago(seconds: float) -> str:
@@ -202,6 +229,8 @@ def create_app(
                 "workspace": ws.root,
                 "claude": app.state.claude,
                 "coordinator_pages": coordinator_pages(),
+                "attention": backlog_attention(ws, backlog),
+                "needs_review": NEEDS_REVIEW,
                 "waiting": BacklogStatus.WAITING,
                 "done": BacklogStatus.DONE,
                 "error": error,

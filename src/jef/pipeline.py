@@ -58,7 +58,7 @@ from jef.projects import (
     set_goal_field,
 )
 from jef.publish import Publisher, PublishError
-from jef.status import Phase, project_phase, write_status
+from jef.status import WAITING, Phase, project_phase, write_status
 from jef.tasks import Task, TaskList, TaskStatus
 from jef.workspace import Workspace
 
@@ -78,8 +78,6 @@ ACTION_APPROVE_TASKS = re.compile(r"^\s*ACTION:\s*approve-tasks\s*$", re.I | re.
 ACTION_START_TASK = re.compile(r"^\s*ACTION:\s*start-task\s+#?(\d+)\s*$", re.I | re.M)
 ACTION_FIX_CONFLICT = re.compile(r"^\s*ACTION:\s*fix-conflict\s+#?(\d+)\s*$", re.I | re.M)
 ACTION_WAIT = re.compile(r"^\s*ACTION:\s*wait\b[ \t:]*(.*?)\s*$", re.I | re.M)
-# The Problem field says this when the coordinator asked to wait for you.
-WAITING = "is waiting for you: "
 TASKS_BLOCK = re.compile(r"```tasks\s*\n(.*?)```", re.S | re.I)
 TASK_LINE = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
 STATUS_LINE = re.compile(r"^\s*STATUS:\s*(working|ready|pr-opened|stuck)\b(.*)$", re.I | re.M)

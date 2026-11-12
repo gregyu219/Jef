@@ -74,7 +74,13 @@
         <tr>
           <td class="num">{{ item.number }}</td>
           <td>{{ item.feature }}</td>
-          <td><span class="pill {{ item.status.value | lower | replace(' ', '-') }}">{{ item.status.value }}</span></td>
+          <td>
+            {% if item.number in attention %}{% set slug, a = attention[item.number] %}
+            <span class="pill needs-you">Needs you</span>
+            {% if a.reason == needs_review %}<a class="reason" href="{{ a.link }}" target="_blank" rel="noopener"{% if a.detail %} title="{{ a.detail }}"{% endif %}>{{ a.link | pr_label }} to review</a>
+            {% else %}<a class="reason" href="/projects/{{ slug }}"{% if a.detail %} title="{{ a.detail }}"{% endif %}>{{ a.reason }}</a>{% endif %}
+            {% else %}<span class="pill {{ item.status.value | lower | replace(' ', '-') }}">{{ item.status.value }}</span>{% endif %}
+          </td>
           <td>
             {% if item.status == waiting %}<a class="start" href="/backlog/{{ item.number }}/start">Start…</a>
             {% elif item.coordinator in coordinator_pages %}<a href="/projects/{{ coordinator_pages[item.coordinator] }}">{{ item.coordinator }}</a>
