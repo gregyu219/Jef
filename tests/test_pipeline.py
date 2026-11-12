@@ -11,7 +11,7 @@ from jef.pipeline import Phase, Pipeline, PipelineError, parse_pr, parse_status,
 from jef.publish import PublishError
 from jef.projects import goal_fields, slugify, start_project
 from jef.tasks import TaskStatus
-from jef.web.app import create_app
+from jef.web.app import ago, create_app
 from jef.workspace import Workspace
 
 
@@ -301,6 +301,72 @@ def approved_with_one_task(w):
     w.reply("research", "findings")
     w.reply("ada", "```tasks\n1. A\n```")
     w.pipeline.approve_tasks(w.slug)
+
+
+def test_check_now_notices_a_merge_straight_away_without_nudging(w):
+    w.pipeline.start_research(w.slug)
+    w.reply("ada", "hi")
+    w.reply("research", "findings")
+    w.reply("ada", "```tasks\n1. A\n2. B\n```")
+    w.pipeline.approve_tasks(w.slug)
+    w.reply("impl-1", READY)  # this tick already checked GitHub, so the next waits five minutes
+    url = w.pipeline.tasks(w.slug).tasks[0].pr
+    w.pr_states[url] = "MERGED"
+    w.pipeline.tick(w.slug)
+    assert w.pipeline.tasks(w.slug).tasks[0].status is TaskStatus.PENDING_REVIEW
+    assert w.pipeline.last_checked(w.slug) is None
+
+    w.pipeline.check_now(w.slug)  # same clock: no waiting
+    tasks = w.pipeline.tasks(w.slug).tasks
+    assert tasks[0].status is TaskStatus.MERGED
+    assert tasks[1].status is TaskStatus.IMPLEMENTATION
+    assert w.pipeline.last_checked(w.slug) == w.clock
+
+    # impl-2 is working; pressing the button again doesn't nudge it.
+    turns = len(w.procs["impl-2"])
+    w.procs["impl-2"][-1].done = True
+    w.pipeline.check_now(w.slug)
+    assert len(w.procs["impl-2"]) == turns
+    assert "Heartbeat check-in" not in w.last_message("impl-2")
+
+
+def test_check_now_reads_a_ready_reply_and_checks_its_pr_in_one_go(w):
+    approved_with_one_task(w)
+    url = "https://github.com/gregyu219/Jef/pull/20"
+    w.pr_states[url] = "MERGED"
+    with w.chats.chat_file(w.slug, "impl-1").open("a") as f:
+        f.write(json.dumps({"type": "result", "is_error": False, "result": READY}) + "\n")
+    w.procs["impl-1"][-1].done = True
+    w.pipeline.check_now(w.slug)
+    assert w.pipeline.phase(w.slug) is Phase.DONE
+
+
+def test_check_now_refuses_finished_projects(w):
+    w.chats.stop(w.slug, "ada")
+    with pytest.raises(PipelineError):
+        w.pipeline.check_now(w.slug)
+
+
+def test_ago():
+    assert ago(5) == "just now"
+    assert ago(60) == "1 minute ago"
+    assert ago(150) == "2 minutes ago"
+    assert ago(2 * 3600 + 5) == "2 hours ago"
+
+
+def test_web_check_button(w):
+    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
+                     chats=w.chats, pipeline=w.pipeline)
+    c = TestClient(app)
+    page = c.get(f"/projects/{w.slug}").text
+    assert "Check status now" in page and "Last checked" not in page
+    response = c.post(f"/projects/{w.slug}/check", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == f"/projects/{w.slug}"
+    assert "Last checked just now" in c.get(f"/projects/{w.slug}").text
+    w.chats.stop(w.slug, "ada")
+    page = c.get(f"/projects/{w.slug}").text
+    assert "Check status now" not in page
+    assert "nothing to check" in c.post(f"/projects/{w.slug}/check").text
 
 
 def test_publish_problems_go_back_to_the_agent_a_few_times(w):

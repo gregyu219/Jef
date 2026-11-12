@@ -82,6 +82,8 @@ Jef's heartbeat runs in the background while Jef is running. Every few seconds i
 
 Once per heartbeat interval (an hour by default; change it on the project page), it nudges implementers that are still working. It checks GitHub for merged PRs every five minutes.
 
+Don't want to wait? The project page has a **Check status now** button that does the same checks straight away: it reads finished replies, asks GitHub about PRs waiting for review, and starts the next task. It doesn't nudge agents, so it costs no tokens.
+
 Tasks are built **one at a time** by default, because they usually build on each other. The next task starts after you merge the last one's PR. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
 
 ### How agents hand work back
