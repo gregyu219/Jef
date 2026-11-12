@@ -22,6 +22,7 @@ from jef.projects import (
     MAX_IMPLEMENTERS_AT_ONCE,
     DeleteError,
     StartError,
+    auto_approve,
     delete_project,
     gh_clone,
     goal_fields,
@@ -31,10 +32,11 @@ from jef.projects import (
     parse_repo,
     project_for_backlog_item,
     projects_on_repo,
+    set_goal_field,
     start_project,
     used_backlog_numbers,
 )
-from jef.status import NEEDS_REVIEW, Attention, needs_you, read_status, status_path, write_status
+from jef.status import NEEDS_REVIEW, Attention, needs_you, project_phase, read_status, status_path, write_status
 from jef.tasks import TaskList, TaskStatus
 from jef.usage import (
     Usage,
@@ -169,6 +171,24 @@ def backlog_attention(ws: Workspace, backlog: Backlog) -> dict[int, tuple[str, A
     return found
 
 
+def backlog_auto_approve(ws: Workspace, backlog: Backlog) -> dict[int, tuple[bool, bool]]:
+    """For each backlog item: (whether Auto approve is on, whether it can
+    still be changed). A started item reads its project's goal.md, the
+    source of truth; a Waiting one reads its backlog row. It stops being
+    changeable once the item is done or its task list is already approved."""
+    slugs = backlog_projects(ws)
+    found = {}
+    for item in backlog.items:
+        slug = slugs.get(item.number)
+        if slug is None:
+            found[item.number] = (item.auto_approve, item.status is not BacklogStatus.DONE)
+            continue
+        phase = project_phase(ws, slug, load_roster(ws, slug))
+        changeable = item.status is not BacklogStatus.DONE and phase not in (Phase.BUILDING, Phase.DONE, Phase.STOPPED)
+        found[item.number] = (auto_approve(ws, slug), changeable)
+    return found
+
+
 def ago(seconds: float) -> str:
     """How long ago, in words: "just now", "5 minutes ago", "2 hours ago"."""
     minutes = int(seconds // 60)
@@ -273,6 +293,7 @@ def create_app(
                 "coordinator_pages": coordinator_pages(),
                 "attention": backlog_attention(ws, backlog),
                 "item_projects": backlog_projects(ws),
+                "auto_approve": backlog_auto_approve(ws, backlog),
                 "needs_review": NEEDS_REVIEW,
                 "waiting": BacklogStatus.WAITING,
                 "error": error,
@@ -356,6 +377,29 @@ def create_app(
         except (ValueError, DeleteError):
             return RedirectResponse("/?error=delete", status_code=303)
         return RedirectResponse("/", status_code=303)
+
+    @app.post("/backlog/{number}/auto-approve")
+    def set_backlog_auto_approve(number: int, on: str = Form("")):
+        """The backlog's Auto approve toggle. A started item's goal.md is
+        what the heartbeat reads, so it changes too; the backlog row always
+        does, so the two stay the same."""
+        value = on == "yes"
+        backlog = Backlog.load(ws.backlog_file)
+        item = next((i for i in backlog.items if i.number == number), None)
+        if item is None:
+            return RedirectResponse("/#backlog", status_code=303)
+        slug = project_for_backlog_item(ws, number)
+        if slug is not None:
+            flow = get_pipeline()
+            if flow is not None:
+                flow.set_auto_approve(slug, value)
+                flow.write_status(slug)
+            else:
+                set_goal_field(ws, slug, "Auto approve", "yes" if value else "no")
+                write_status(ws, slug, load_roster(ws, slug))
+        item.auto_approve = value
+        backlog.save(ws.backlog_file)
+        return RedirectResponse("/#backlog", status_code=303)
 
     @app.post("/projects/{slug}/delete")
     def delete_project_page(slug: str):
