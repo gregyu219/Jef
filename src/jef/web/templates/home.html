@@ -4,6 +4,34 @@
   {% if claude and not claude.ok %}
   <div class="banner">Agents can't run until Claude Code works on this computer. <a href="/settings">See what to do in Settings</a>.</div>
   {% endif %}
+  <section id="usage">
+    <h2>Your Claude usage</h2>
+    {% if plan_usage %}
+    <p class="hint">As of {{ plan_seen }}, from the last agent run. Updates whenever an agent runs; no AI calls.</p>
+    <table class="plan">
+      <tbody>
+      {% for w in plan_usage.windows %}
+        <tr>
+          <td>{{ w.label }}</td>
+          {% if w.reset_since(now) %}
+          <td colspan="3" class="hint">Reset since</td>
+          {% else %}
+          <td><div class="bar" role="img" aria-label="{{ w.percent }}% used"><span class="{{ 'over' if w.percent >= 90 else 's2' }}" style="width: {{ [w.percent, 100] | min }}%"></span></div></td>
+          <td class="pct">{{ w.percent }}%</td>
+          <td class="hint">{% if w.resets_at %}resets {{ w.resets_at | reset(now) }}{% endif %}</td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% for w in plan_usage.windows %}{% if w.status and w.status != "allowed" and not w.reset_since(now) %}
+    <p class="error">{% if w.status == "rejected" %}{{ w.label }}: limit reached. Agents can't run until it resets.{% else %}{{ w.label }}: close to the limit ({{ w.status | replace("_", " ") }}).{% endif %}</p>
+    {% endif %}{% endfor %}
+    {% else %}
+    <p class="empty">No plan usage seen yet. It appears after any agent or Jef chat runs. (API-key sign-ins don't report plan limits.)</p>
+    {% endif %}
+    <p class="total">Jef's estimated cost, all projects: <strong>{{ total_cost | cost }}</strong> <span class="hint">(Claude Code's list-price estimate)</span></p>
+  </section>
   <section id="jef">
     <h2>Chat with Jef</h2>
     <p class="hint">Ask about your backlog and how projects are going. Jef starts with a briefing on both, and can read the details but can't change anything. Reset saves this conversation and starts Jef fresh with a new briefing.</p>

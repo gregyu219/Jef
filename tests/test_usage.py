@@ -1,4 +1,6 @@
 import json
+import os
+from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
@@ -11,10 +13,12 @@ from jef.usage import (
     budget_left,
     budget_usd,
     format_cost,
+    latest_plan_usage,
     parse_budget,
+    plan_windows,
 )
 from jef.usage import format_tokens, project_total, project_usage, usage_from_event
-from jef.web.app import create_app
+from jef.web.app import create_app, format_reset
 from jef.workspace import Workspace
 
 # Shaped like a real result event from a coordinator's chat log.
@@ -109,6 +113,119 @@ def test_formatting():
     assert format_tokens(4_560_000) == "4.56M"
     assert format_cost(0.2268) == "$0.23"
     assert format_cost(1234.5) == "$1,234.50"
+
+
+FUTURE = 4_000_000_000  # year 2096
+LATER = FUTURE + 300_000
+
+
+def rate_event(five=0.73, week=0.07, five_reset=FUTURE, week_reset=LATER, status="allowed"):
+    """Shaped like a real rate_limit_event from an agent's chat log."""
+    return {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": status, "resetsAt": five_reset, "rateLimitType": "five_hour",
+            "overageStatus": "rejected", "isUsingOverage": False,
+            "unifiedWindows": {
+                "five_hour": {"utilization": five, "resetsAt": five_reset, "status": status},
+                "seven_day": {"utilization": week, "resetsAt": week_reset, "status": "allowed"},
+            },
+        },
+        "session_id": "s1",
+    }
+
+
+def test_plan_windows_from_unified_windows():
+    five, week = plan_windows(rate_event())
+    assert (five.name, five.label, five.percent, five.status) == ("five_hour", "Current session (5 hours)", 73, "allowed")
+    assert five.resets_at == datetime.fromtimestamp(FUTURE, tz=timezone.utc)
+    assert (week.label, week.percent) == ("This week", 7)
+
+
+def test_plan_windows_from_the_older_top_level_format():
+    event = {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "rateLimitType": "seven_day_opus", "utilization": 0.9, "resetsAt": FUTURE}}
+    (window,) = plan_windows(event)
+    assert (window.label, window.percent, window.status) == ("Seven day opus", 90, "allowed_warning")
+
+
+def test_plan_windows_skip_odd_values():
+    assert plan_windows({"type": "rate_limit_event"}) == []
+    assert plan_windows({"rate_limit_info": {"rateLimitType": "five_hour"}}) == []
+    event = {"rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": "lots"}, "seven_day": {"utilization": 0.5, "resetsAt": "soon"}, "x": 3}}}
+    (week,) = plan_windows(event)
+    assert week.name == "seven_day" and week.resets_at is None
+
+
+def test_reset_since():
+    window = plan_windows(rate_event(five_reset=1_000))[0]
+    assert window.reset_since(datetime.now(timezone.utc))
+    assert not plan_windows(rate_event())[0].reset_since(datetime.now(timezone.utc))
+
+
+def test_latest_plan_usage_takes_the_last_event_in_the_newest_log(tmp_path):
+    ws = Workspace(tmp_path)
+    assert latest_plan_usage(ws) is None
+    old = ws.project_dir("a") / "chats" / "ada.jsonl"
+    new = ws.project_dir("b") / "chats" / "impl-1.jsonl"
+    write_log(old, rate_event(five=0.99))
+    write_log(new, rate_event(five=0.10), "not json {", rate_event(five=0.20), RESULT, "rate_limit_event broken")
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (2_000_000, 2_000_000))
+    plan = latest_plan_usage(ws)
+    assert plan.windows[0].percent == 20
+    assert plan.seen_at == datetime.fromtimestamp(2_000_000, tz=timezone.utc)
+    # A newer log with no plan usage in it is passed over.
+    empty = ws.project_dir("b") / "chats" / "impl-2.jsonl"
+    write_log(empty, RESULT)
+    assert latest_plan_usage(ws).windows[0].percent == 20
+
+
+def test_latest_plan_usage_includes_the_home_chat(tmp_path):
+    ws = Workspace(tmp_path)
+    project = ws.project_dir("a") / "chats" / "ada.jsonl"
+    home = tmp_path / "jef" / "projects" / "home" / "chats" / "jef.jsonl"
+    write_log(project, rate_event(five=0.30))
+    write_log(home, rate_event(five=0.40))
+    os.utime(project, (1_000_000, 1_000_000))
+    os.utime(home, (2_000_000, 2_000_000))
+    assert latest_plan_usage(ws).windows[0].percent == 40
+
+
+def test_format_reset():
+    now = datetime(2026, 11, 11, 9, 0).astimezone()
+    assert format_reset(now.replace(hour=15), now) == "3:00 pm"
+    assert format_reset(now.replace(hour=0, minute=5), now) == "12:05 am"
+    assert format_reset(datetime(2026, 11, 14, 9, 30).astimezone(), now) == "Sat 14 Nov, 9:30 am"
+
+
+def test_home_page_shows_plan_usage_and_total_cost(tmp_path):
+    ws = Workspace(tmp_path)
+    for slug in ("demo", "other"):
+        (ws.project_dir(slug)).mkdir(parents=True)
+        (ws.project_dir(slug) / "tasks.md").write_text("# Tasks: Demo\n")
+        write_log(ws.project_dir(slug) / "chats" / "ada.jsonl", RESULT)
+    write_log(ws.project_dir("demo") / "chats" / "ada.jsonl", RESULT, rate_event(five=0.75, week=0.07))
+    client = TestClient(create_app(ws, github_check=lambda: GitHubStatus(True, "o")))
+    page = client.get("/").text
+    assert "Current session (5 hours)" in page and "75%" in page
+    assert "This week" in page and "7%" in page
+    assert "resets " in page and "As of just now" in page
+    assert "limit reached" not in page
+    assert "$0.45" in page  # both projects added up
+
+
+def test_home_page_shows_a_reached_limit_and_reset_windows(tmp_path):
+    ws = Workspace(tmp_path)
+    write_log(ws.project_dir("demo") / "chats" / "ada.jsonl", rate_event(five=1.0, status="rejected", week_reset=1_000))
+    page = TestClient(create_app(ws, github_check=lambda: GitHubStatus(True, "o"))).get("/").text
+    assert "Current session (5 hours): limit reached" in page
+    assert "Reset since" in page
+
+
+def test_home_page_without_plan_usage(tmp_path):
+    page = TestClient(create_app(Workspace(tmp_path), github_check=lambda: GitHubStatus(True, "o"))).get("/").text
+    assert "No plan usage seen yet" in page
+    assert "$0.00" in page
 
 
 def test_pages_show_usage(tmp_path):

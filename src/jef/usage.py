@@ -9,14 +9,20 @@ drift out of step. A turn that was stopped before it finished writes no
 
 A project can have a dollar budget, a ``- Budget: 20.00 USD`` line in its
 goal.md. ``budget_left`` is what Jef checks before starting any turn.
+
+Claude Code also writes ``rate_limit_event`` lines into the same logs: how
+much of your plan's 5-hour and weekly limits you've used. ``latest_plan_usage``
+reads the newest one, so the home page can show it without any extra call.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
+from jef import jefchat
 from jef.projects import goal_fields
 from jef.workspace import Workspace
 
@@ -127,6 +133,117 @@ def budget_left(ws: Workspace, slug: str) -> float | None:
     if budget is None:
         return None
     return budget - project_total(ws, slug).cost_usd
+
+
+WINDOW_LABELS = {
+    "five_hour": "Current session (5 hours)",
+    "seven_day": "This week",
+}
+
+
+@dataclass(frozen=True)
+class PlanWindow:
+    """One plan limit, like the 5-hour session or the week."""
+
+    name: str
+    utilization: float  # 0 to 1 (can go past 1 when over the limit)
+    resets_at: datetime | None
+    status: str = ""
+
+    @property
+    def label(self) -> str:
+        return WINDOW_LABELS.get(self.name) or self.name.replace("_", " ").strip().capitalize()
+
+    @property
+    def percent(self) -> int:
+        return round(self.utilization * 100)
+
+    def reset_since(self, now: datetime) -> bool:
+        """True once the window has reset, so the saved percentage is stale."""
+        return self.resets_at is not None and self.resets_at <= now
+
+
+@dataclass(frozen=True)
+class PlanUsage:
+    windows: list[PlanWindow] = field(default_factory=list)
+    seen_at: datetime | None = None  # when the log it came from was written
+
+
+def _number(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value == value and abs(value) != float("inf") else None
+
+
+def _time(value) -> datetime | None:
+    seconds = _number(value)
+    if seconds is None or seconds <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _window(name, info) -> PlanWindow | None:
+    if not isinstance(name, str) or not name or not isinstance(info, dict):
+        return None
+    utilization = _number(info.get("utilization"))
+    if utilization is None:
+        return None
+    status = info.get("status")
+    return PlanWindow(name, max(utilization, 0.0), _time(info.get("resetsAt")), status if isinstance(status, str) else "")
+
+
+def plan_windows(event: dict) -> list[PlanWindow]:
+    """The plan limits in one ``rate_limit_event``. Odd values are skipped."""
+    info = event.get("rate_limit_info")
+    if not isinstance(info, dict):
+        return []
+    unified = info.get("unifiedWindows")
+    if isinstance(unified, dict):
+        windows = [_window(name, window) for name, window in unified.items()]
+    else:
+        windows = [_window(info.get("rateLimitType"), info)]
+    return [w for w in windows if w is not None]
+
+
+def _last_plan_windows(path: Path) -> list[PlanWindow]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    for raw in reversed(lines):
+        if "rate_limit_event" not in raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "rate_limit_event":
+            windows = plan_windows(event)
+            if windows:
+                return windows
+    return []
+
+
+def latest_plan_usage(ws: Workspace) -> PlanUsage | None:
+    """Your plan usage from the newest chat log that has any, across every
+    project and the home page's Jef chat. None if no log has any yet."""
+    folders = [ws.project_dir(slug) / "chats" for slug in ws.project_slugs()]
+    folders.append(jefchat.jef_workspace(ws).project_dir(jefchat.HOME) / "chats")
+    logs = []
+    for folder in folders:
+        for path in folder.glob("*.jsonl") if folder.is_dir() else []:
+            try:
+                logs.append((path.stat().st_mtime, str(path), path))
+            except OSError:
+                continue
+    for mtime, _, path in sorted(logs, reverse=True):
+        windows = _last_plan_windows(path)
+        if windows:
+            return PlanUsage(windows, datetime.fromtimestamp(mtime, tz=timezone.utc))
+    return None
 
 
 def format_tokens(count: int) -> str:

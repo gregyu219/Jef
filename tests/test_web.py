@@ -25,6 +25,7 @@ def test_home_page_shows_empty_states(client):
     assert page.status_code == 200
     assert "Your backlog is empty" in page.text
     assert "No projects yet" in page.text
+    assert "No plan usage seen yet" in page.text
 
 
 def test_adding_a_backlog_item_saves_it_and_shows_it(ws, client):

@@ -134,6 +134,8 @@ If something needs fixing, Jef tells the agent, up to three times, then marks it
 
 Every finished agent turn ends with a summary from Claude Code that includes the tokens it used and an estimated cost. Jef adds these up straight from the chat logs (no separate ledger) and shows them per agent and per project on the project page, the agent page and the home page. The costs are Claude Code's estimates at API list prices: if you sign in with a Claude subscription you aren't billed per token, so read them as "what this would cost on the API". A turn that's stopped before it finishes writes no summary, so its usage isn't counted.
 
+The home page also shows your Claude plan usage: how much of the 5-hour session and the weekly limit you've used, and when each resets. It's what Claude Code's `/usage` shows, read from the newest `rate_limit_event` in any agent's (or Jef chat's) log, so it costs nothing to look at. It's only as fresh as the last agent run, so Claude use outside Jef shows up after the next one. Sign-ins with an API key don't report plan limits. Below it is Jef's total estimated cost across all projects.
+
 ### Budgets
 
 Each project can have a dollar budget, set under Usage on its project page (it's saved as a `- Budget: 20.00 USD` line in `goal.md`). Projects have no budget unless you set one. With a budget:
