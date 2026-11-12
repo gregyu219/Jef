@@ -22,6 +22,7 @@ The heartbeat rewrites it whenever something in it changes.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -32,6 +33,8 @@ from jef.projects import goal_fields, load_project
 from jef.tasks import TaskList, TaskStatus
 from jef.workspace import Workspace
 
+# The Problem field says this when the coordinator asked to wait for you.
+WAITING = "is waiting for you: "
 STATUS_FILE = "status.md"
 HEADERS = ["#", "Task", "Stage", "Agent", "Agent status", "PR", "Note"]
 UPDATED = "- Updated:"
@@ -77,6 +80,43 @@ def project_phase(ws: Workspace, slug: str, agents: list[Agent]) -> Phase:
     if research == "started":
         return Phase.RESEARCH
     return Phase.UNDERSTANDING
+
+
+@dataclass
+class Attention:
+    """Something in a project that is waiting on you, not on an agent."""
+
+    reason: str  # one of the NEEDS_* values below
+    detail: str = ""  # the question or problem, on one line
+    link: str = ""  # the PR's URL when reason is NEEDS_REVIEW
+
+
+NEEDS_QUESTION = "Question"
+NEEDS_PROBLEM = "Problem"
+NEEDS_REVIEW = "PR to review"
+NEEDS_APPROVAL = "Approve tasks"
+
+
+def needs_you(ws: Workspace, slug: str, agents: list[Agent]) -> Attention | None:
+    """What in the project is waiting on you, from its files alone (no LLM or
+    GitHub call), or None when it's with the agents or finished."""
+    phase = project_phase(ws, slug, agents)
+    if phase in (Phase.DONE, Phase.STOPPED):
+        return None
+    fields = goal_fields(ws, slug)
+    problem = fields.get("problem", "")
+    if problem.lower() not in ("", "none"):
+        if WAITING in problem:
+            return Attention(NEEDS_QUESTION, _one_line(problem.split(WAITING, 1)[1], 300))
+        return Attention(NEEDS_PROBLEM, _one_line(problem, 300))
+    conflict = fields.get("conflict", "").split()
+    fixing = int(conflict[1]) if len(conflict) == 2 and conflict[0] == "fixing" and conflict[1].isdigit() else None
+    for task in TaskList.load(ws.project_dir(slug) / "tasks.md").tasks:
+        if task.status is TaskStatus.PENDING_REVIEW and task.pr and task.number != fixing:
+            return Attention(NEEDS_REVIEW, _one_line(task.title, 300), link=task.pr)
+    if phase is Phase.APPROVAL:
+        return Attention(NEEDS_APPROVAL)
+    return None
 
 
 def render_status(ws: Workspace, slug: str, agents: list[Agent], now: datetime | None = None) -> str:

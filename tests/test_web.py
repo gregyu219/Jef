@@ -154,6 +154,41 @@ def test_home_page_shows_delete_for_waiting_and_done_items_only(ws, client):
     assert "Its project and PRs stay." in page.text
 
 
+def test_backlog_shows_needs_you_with_a_link_to_the_pr(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(WITH_DONE + "| 4 | Export | In progress | Bea |\n")
+    folder = ws.project_dir("todo-app")
+    folder.mkdir(parents=True)
+    (folder / "goal.md").write_text(
+        "# Goal: To-do list app\n\n- Repo: o/r\n- Coordinator: Ada\n- Backlog item: #1\n- Tasks approved: yes\n",
+        encoding="utf-8",
+    )
+    (folder / "tasks.md").write_text(
+        "# Tasks: To-do list app\n\n| # | Task | Status | Agent | PR |\n| --- | --- | --- | --- | --- |\n"
+        "| 1 | Set up | Pending review | impl-1 | https://github.com/o/r/pull/34 |\n"
+    )
+    page = client.get("/").text
+    assert page.count(">Needs you</span>") == 1
+    assert 'href="https://github.com/o/r/pull/34"' in page and "PR #34 to review</a>" in page
+    assert ">In progress</span>" in page  # item 4 has no project, so it's still with the agents
+    assert 'action="/backlog/1/delete"' not in page  # still in progress underneath
+
+
+def test_backlog_links_other_reasons_to_the_project_page(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    folder = ws.project_dir("todo-app")
+    folder.mkdir(parents=True)
+    (folder / "goal.md").write_text(
+        "# Goal: To-do list app\n\n- Repo: o/r\n- Coordinator: Ada\n- Backlog item: #1\n"
+        "- Problem: Ada is waiting for you: Which colour?\n",
+        encoding="utf-8",
+    )
+    page = client.get("/").text
+    assert ">Needs you</span>" in page
+    assert '<a class="reason" href="/projects/todo-app" title="Which colour?">Question</a>' in page
+
+
 def test_deleting_a_done_item_removes_it(ws, client):
     ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
     ws.backlog_file.write_text(WITH_DONE)
