@@ -6,6 +6,48 @@ You tell Jef what you want built. Jef keeps a backlog, and when you say go, it h
 
 > Status: early development. Jef is building itself first. Nothing runs yet.
 
+## Running Jef
+
+### First time
+
+```
+git clone git@github.com:gregyu219/Jef.git
+cd Jef
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+```
+
+### Start it
+
+```
+.venv/bin/jef
+```
+
+Your browser opens to http://127.0.0.1:8765. Press **Ctrl+C** to stop. Jef only listens on your own computer; nothing else on your network can reach it.
+
+Options: `--port 9000` to use another port, `--no-browser` to skip opening the browser. Set `JEF_HOME=/some/folder` to use a different workspace than `~/.jef`.
+
+### Keep it running all the time (tmux)
+
+Coordinators heartbeat every hour, so Jef needs to stay running. [tmux](https://github.com/tmux/tmux) keeps it going after you close the Terminal window.
+
+```
+brew install tmux                        # once
+tmux new -s jef                          # start a session named "jef"
+caffeinate -is .venv/bin/jef --no-browser
+```
+
+`caffeinate -is` stops your Mac from sleeping while Jef runs (`-s` only applies when plugged in).
+
+- **Leave it running:** press **Ctrl+B**, then **D**. Jef keeps running in the background.
+- **Check on it:** `tmux attach -t jef`
+- **Stop it:** attach, then press **Ctrl+C**.
+
+Things tmux can't help with:
+
+- **Sleep:** if your Mac sleeps, Jef pauses until it wakes. Closing a laptop lid puts it to sleep unless it's plugged in with an external display.
+- **Restarts:** after a reboot, start the tmux session again.
+
 ## How it works
 
 Jef has four levels. Each one hands work to the level below it and keeps track of its own part.
