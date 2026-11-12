@@ -23,9 +23,11 @@ LEVELS: dict[Role, str] = {
     Role.IMPLEMENTER: "Implementer model",
 }
 
-# Cheap and fast for routine heartbeats, strong for research and building.
+# Sonnet for the coordinator: cheaper than Opus for routine heartbeats, but it
+# also reviews PRs, fixes conflicts and chats with the person, so not Haiku
+# (a project can still choose Haiku). Opus for research and building.
 DEFAULTS: dict[Role, str] = {
-    Role.COORDINATOR: "haiku",
+    Role.COORDINATOR: "sonnet",
     Role.RESEARCH: "opus",
     Role.IMPLEMENTER: "opus",
 }
