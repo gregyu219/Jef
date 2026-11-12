@@ -6,6 +6,45 @@ You tell Jef what you want built. Jef keeps a backlog, and when you say go, it h
 
 > Status: early development. Jef is building itself first. Nothing runs yet.
 
+## Running Jef
+
+### Install (once)
+
+```
+git clone git@github.com:gregyu219/Jef.git
+cd Jef
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+mkdir -p ~/.local/bin
+ln -s "$PWD/.venv/bin/jef" ~/.local/bin/jef
+brew install tmux
+```
+
+The `ln -s` line puts the `jef` command on your PATH, so you can type `jef` from any folder. (If `jef` isn't found afterwards, add `~/.local/bin` to your PATH.) Because Jef is installed in editable mode, code changes take effect without reinstalling.
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `jef start` | Runs Jef in the background and opens your browser. Keeps going after you close the terminal. |
+| `jef status` | Shows whether Jef is running, and its address |
+| `jef attach` | Opens Jef's background session so you can watch it. Press **Ctrl+B**, then **D**, to leave it running. |
+| `jef stop` | Stops Jef |
+| `jef run` | Runs Jef in this terminal instead. **Ctrl+C** stops it. Plain `jef` does the same. |
+
+Jef's page is at http://127.0.0.1:8765. It only listens on your own computer; nothing else on your network can reach it.
+
+Options for `start` and `run`: `--port 9000` to use another port, `--no-browser` to skip opening the browser. Set `JEF_HOME=/some/folder` to use a different workspace than `~/.jef`.
+
+### Running all the time
+
+Coordinators heartbeat every hour, so Jef needs to stay running. `jef start` handles that: it runs Jef inside a background [tmux](https://github.com/tmux/tmux) session named `jef`, wrapped in `caffeinate -is` so your Mac doesn't fall asleep while it's plugged in.
+
+Things it can't help with:
+
+- **Sleep:** if your Mac sleeps, Jef pauses until it wakes. Closing a laptop lid puts it to sleep unless it's plugged in with an external display.
+- **Restarts:** after a reboot, run `jef start` again.
+
 ## How it works
 
 Jef has four levels. Each one hands work to the level below it and keeps track of its own part.

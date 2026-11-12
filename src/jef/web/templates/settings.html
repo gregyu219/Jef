@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Settings · Jef{% endblock %}
+{% block content %}
+  <section>
+    <h2>Anthropic API key</h2>
+    <p class="hint">Jef's agents use this key to talk to Claude. It's saved in your computer's keychain, never in a file, and Jef blocks anything that contains it from being committed or pushed to GitHub.</p>
+    {% if key_masked %}
+    <p><span class="ok">Saved</span> &nbsp;<code>{{ key_masked }}</code></p>
+    {% else %}
+    <p><span class="missing">Not set.</span> You can create a key in the Anthropic Console.</p>
+    {% endif %}
+    <form method="post" action="/settings/anthropic-key">
+      <input type="password" name="key" placeholder="{{ 'Paste a new key to replace it' if key_masked else 'Paste your API key' }}" aria-label="Anthropic API key" autocomplete="off">
+      <button type="submit">Save key</button>
+    </form>
+    {% if key_masked %}
+    <form method="post" action="/settings/anthropic-key/delete">
+      <button type="submit" class="secondary">Remove key</button>
+    </form>
+    {% endif %}
+    {% if notice == "saved" %}<p class="notice">Key saved.</p>{% endif %}
+    {% if notice == "removed" %}<p class="notice">Key removed.</p>{% endif %}
+    {% if error == "empty" %}<p class="error">Paste a key first.</p>{% endif %}
+    {% if error == "shape" %}<p class="error">That doesn't look like an Anthropic API key. They start with <code>sk-ant-</code>.</p>{% endif %}
+  </section>
+
+  <section>
+    <h2>GitHub</h2>
+    <p class="hint">For now, Jef commits and opens PRs with your own GitHub CLI login. Jef never reads or stores the token; it only asks <code>gh</code> which account is signed in.</p>
+    {% if github.ready %}
+    <p><span class="ok">Signed in</span> as <strong>{{ github.account }}</strong></p>
+    {% elif github.installed %}
+    <p><span class="missing">Not signed in.</span> Run <code>gh auth login</code> in a terminal, then reload this page.</p>
+    {% else %}
+    <p><span class="missing">GitHub CLI not found.</span> Install it from cli.github.com, run <code>gh auth login</code>, then reload this page.</p>
+    {% endif %}
+  </section>
+{% endblock %}
