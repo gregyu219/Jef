@@ -42,6 +42,9 @@ class FakeGit:
         self.worktrees.append((branch, base))
         path.mkdir(parents=True)
 
+    def fetch(self, repo):
+        self.fetches = getattr(self, "fetches", 0) + 1
+
 
 class FakePublisher:
     def __init__(self):
@@ -175,13 +178,20 @@ def test_from_go_to_done(w):
     assert p.tasks(slug).tasks[0].status is TaskStatus.PENDING_REVIEW
     assert p.tasks(slug).tasks[0].pr == url
     assert "impl-2" not in w.procs  # one at a time
+    assert w.agent("impl-1").note.startswith("PR opened")
     w.pr_states[url] = "MERGED"
     w.clock += 301
     p.tick(slug)
     tasks = p.tasks(slug).tasks
     assert tasks[0].status is TaskStatus.MERGED
     assert w.agent("impl-1").status is Status.STOPPED
-    assert tasks[1].status is TaskStatus.IMPLEMENTATION
+    # Ada, not Jef, decides when task 2 starts.
+    assert tasks[1].status is TaskStatus.NOT_STARTED
+    assert "PR #20" in w.last_message("ada") and "ACTION: start-task" in w.last_message("ada")
+    w.reply("ada", "Task 2 still makes sense.\nACTION: start-task 2")
+    assert p.tasks(slug).tasks[1].status is TaskStatus.IMPLEMENTATION
+    assert w.agent("impl-2").note == "Started by Ada after PR #20 merged"
+    assert w.agent("ada").note == "Started task 2"
 
     # Last PR merged: the project and its backlog item are done, agents stopped.
     url2 = "https://github.com/gregyu219/Jef/pull/21"
@@ -447,7 +457,9 @@ def test_check_now_notices_a_merge_straight_away_without_nudging(w):
     w.pipeline.check_now(w.slug)  # same clock: no waiting
     tasks = w.pipeline.tasks(w.slug).tasks
     assert tasks[0].status is TaskStatus.MERGED
-    assert tasks[1].status is TaskStatus.IMPLEMENTATION
+    assert "ACTION: start-task" in w.last_message("ada")  # Ada is asked straight away
+    w.reply("ada", "ACTION: start-task 2")
+    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.IMPLEMENTATION
     assert w.pipeline.last_checked(w.slug) == w.clock
 
     # impl-2 is working; pressing the button again doesn't nudge it.
@@ -569,3 +581,116 @@ def test_check_now_writes_the_status(w):
     status_path(w.ws, w.slug).unlink()
     w.pipeline.check_now(w.slug)
     assert read_status(w.ws, w.slug)["phase"] == "Research"
+
+
+# ---- the coordinator decides when the next task starts
+
+
+def first_task_merged(w, block="```tasks\n1. A\n2. B\n3. C\n```"):
+    tasks_waiting(w, block)
+    w.pipeline.approve_tasks(w.slug)
+    assert w.agent("impl-1").note == "Started by Jef when the tasks were approved"
+    w.reply("impl-1", READY)
+    w.pr_states["https://github.com/gregyu219/Jef/pull/20"] = "MERGED"
+    w.pipeline.check_now(w.slug)
+    assert w.pipeline.tasks(w.slug).tasks[0].status is TaskStatus.MERGED
+    assert "PR #20" in w.last_message("ada")
+
+
+def test_the_coordinator_can_revise_the_remaining_tasks_then_start_one(w):
+    first_task_merged(w)
+    w.reply("ada", "B isn't needed now.\n```tasks\n1. Ignored, already merged\n2. C, reworded\n```\nACTION: start-task 2")
+    tasks = w.pipeline.tasks(w.slug).tasks
+    assert [(t.number, t.title, t.status) for t in tasks] == [
+        (1, "A", TaskStatus.MERGED), (2, "C, reworded", TaskStatus.IMPLEMENTATION),
+    ]
+    assert "Revised the remaining tasks (1 left)" in w.agent("ada").note
+
+
+def test_a_task_list_without_the_start_marker_changes_nothing(w):
+    first_task_merged(w)
+    w.reply("ada", "Maybe:\n```tasks\n2. Something else\n```")
+    assert [t.title for t in w.pipeline.tasks(w.slug).tasks] == ["A", "B", "C"]
+
+
+def test_the_coordinator_can_wait_for_you(w):
+    first_task_merged(w)
+    w.reply("ada", "Should B use the new API?\nACTION: wait need to know whether B uses the new API")
+    assert "Ada is waiting for you: need to know whether B uses the new API" in w.pipeline.problem(w.slug)
+    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.NOT_STARTED
+    # You answer in the chat; Ada starts it, and the wait is over.
+    w.chats.send(w.slug, "ada", "yes, the new API")
+    w.reply("ada", "ACTION: start-task 2")
+    assert w.pipeline.problem(w.slug) == ""
+    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.IMPLEMENTATION
+
+
+def test_try_again_after_a_wait_asks_the_coordinator_again(w):
+    first_task_merged(w)
+    w.reply("ada", "ACTION: wait question")
+    turns = len(w.procs["ada"])
+    w.pipeline.clear_problem(w.slug)
+    assert len(w.procs["ada"]) == turns + 1 and "ACTION: start-task" in w.last_message("ada")
+
+
+def test_bad_start_requests_are_refused_with_a_note(w):
+    first_task_merged(w)
+    w.reply("ada", "ACTION: start-task 1")
+    assert "already Merged" in w.agent("ada").note
+    w.chats.send(w.slug, "ada", "hmm")
+    w.reply("ada", "ACTION: start-task 9")
+    assert "no task 9" in w.agent("ada").note
+    w.chats.send(w.slug, "ada", "hmm")
+    w.reply("ada", "ACTION: start-task 2")
+    w.chats.send(w.slug, "ada", "and 3?")
+    w.reply("ada", "ACTION: start-task 3")
+    assert "task 2 isn't merged yet" in w.agent("ada").note
+    assert w.pipeline.tasks(w.slug).tasks[2].status is TaskStatus.NOT_STARTED
+
+
+def test_no_answer_gets_one_reminder_then_a_problem(w):
+    first_task_merged(w)
+    w.reply("ada", "Let me think about it.")  # no marker
+    turns = len(w.procs["ada"])
+    w.clock += 59 * 60
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns
+    w.clock += 60
+    w.pipeline.tick(w.slug)
+    assert "still waiting for you to say which task starts next" in w.last_message("ada")
+    w.reply("ada", "Still thinking.")
+    w.clock += 60 * 60
+    w.pipeline.tick(w.slug)
+    assert "hasn't said which task to start next" in w.pipeline.problem(w.slug)
+    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.NOT_STARTED  # never silently
+
+
+def test_turned_off_jef_starts_the_next_task_itself(w):
+    assert w.pipeline.coordinator_starts(w.slug)  # on by default
+    w.pipeline.set_coordinator_starts(w.slug, False)
+    assert goal_fields(w.ws, w.slug)["coordinator starts tasks"] == "no"
+    tasks_waiting(w)
+    w.pipeline.approve_tasks(w.slug)
+    w.reply("impl-1", READY)
+    w.pr_states["https://github.com/gregyu219/Jef/pull/20"] = "MERGED"
+    turns = len(w.procs["ada"])
+    w.pipeline.check_now(w.slug)
+    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.IMPLEMENTATION
+    assert w.agent("impl-2").note == "Started by Jef after PR #20 merged"
+    assert len(w.procs["ada"]) == turns  # not asked
+    # Ada can't start tasks while it's off.
+    w.chats.send(w.slug, "ada", "hi")
+    w.reply("ada", "ACTION: start-task 2")
+    assert "Jef starts tasks itself" in w.agent("ada").note
+
+
+def test_coordinator_starts_toggle_on_the_page(w):
+    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
+                     chats=w.chats, pipeline=w.pipeline)
+    c = TestClient(app)
+    approved_with_one_task(w)
+    page = c.get(f"/projects/{w.slug}").text
+    assert "Ada decides when the next task starts" in page
+    c.post(f"/projects/{w.slug}/coordinator-starts", data={"on": "no"})
+    assert not w.pipeline.coordinator_starts(w.slug)
+    assert "Jef starts the next task straight away" in c.get(f"/projects/{w.slug}").text
