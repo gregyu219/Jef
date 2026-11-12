@@ -15,6 +15,7 @@ from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Chats, ChatError, Status
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
+from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError
 from jef.projects import StartError, gh_clone, load_project, start_project
 from jef.tasks import TaskList, TaskStatus
 from jef.workspace import Workspace
@@ -56,12 +57,14 @@ def create_app(
     claude_check: Callable[[], ClaudeCheck] = claude.check,
     chats: Chats | None = None,
     clone: Callable[[str, Path], None] = gh_clone,
+    pipeline: Pipeline | None = None,
 ) -> FastAPI:
     """``claude_status`` is the result of the check ``jef`` ran on startup, if any."""
     ws = workspace or Workspace.default()
     app = FastAPI(title="Jef", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.claude = claude_status
     app.state.chats = chats
+    app.state.pipeline = pipeline
 
     def get_chats() -> Chats | None:
         """Agents can only run once Claude Code has been checked and works."""
@@ -69,6 +72,15 @@ def create_app(
         if app.state.chats is None and status is not None and status.ok:
             app.state.chats = Chats(ws, status.path)
         return app.state.chats
+
+    def get_pipeline() -> Pipeline | None:
+        runner = get_chats()
+        if app.state.pipeline is None and runner is not None:
+            app.state.pipeline = Pipeline(ws, runner)
+        return app.state.pipeline
+
+    def known(slug: str):
+        return load_project(ws, slug) if slug in ws.project_slugs() else None
 
     def coordinator_pages() -> dict[str, str]:
         """Coordinator name -> its project's slug, for linking from the backlog."""
@@ -152,10 +164,11 @@ def create_app(
 
     @app.get("/projects/{slug}", response_class=HTMLResponse)
     def project_page(request: Request, slug: str, error: str = ""):
-        project = load_project(ws, slug) if slug in ws.project_slugs() else None
+        project = known(slug)
         if project is None:
             return RedirectResponse("/", status_code=303)
         runner = get_chats()
+        flow = get_pipeline()
         agents = runner.refresh(slug) if runner else []
         coordinator = next((a for a in agents if a.name == project.coordinator_agent), None)
         return TEMPLATES.TemplateResponse(
@@ -170,13 +183,70 @@ def create_app(
                 "tasks": TaskList.load(ws.project_dir(slug) / "tasks.md").tasks,
                 "working": any(a.status is Status.WORKING for a in agents),
                 "claude_ok": runner is not None,
+                "phase": flow.phase(slug) if flow else None,
+                "phases": Phase,
+                "problem": flow.problem(slug) if flow else "",
+                "research": flow.research(slug) if flow else "",
+                "heartbeat": flow.heartbeat_minutes(slug) if flow else 60,
+                "at_once": IMPLEMENTERS_AT_ONCE,
                 "error": error,
+            },
+        )
+
+    def pipeline_action(slug: str, action: Callable[[Pipeline], None]):
+        flow = get_pipeline()
+        if known(slug) is None:
+            return RedirectResponse("/", status_code=303)
+        if flow is None:
+            return RedirectResponse(f"/projects/{slug}?error=claude", status_code=303)
+        try:
+            action(flow)
+        except (PipelineError, ChatError) as err:
+            from urllib.parse import quote
+
+            return RedirectResponse(f"/projects/{slug}?error=" + quote(str(err)), status_code=303)
+        return RedirectResponse(f"/projects/{slug}", status_code=303)
+
+    @app.post("/projects/{slug}/research")
+    def start_research(slug: str):
+        return pipeline_action(slug, lambda flow: flow.start_research(slug))
+
+    @app.post("/projects/{slug}/approve")
+    def approve(slug: str):
+        return pipeline_action(slug, lambda flow: flow.approve_tasks(slug))
+
+    @app.post("/projects/{slug}/retry")
+    def retry(slug: str):
+        return pipeline_action(slug, lambda flow: flow.clear_problem(slug))
+
+    @app.post("/projects/{slug}/heartbeat")
+    def set_heartbeat(slug: str, minutes: str = Form("")):
+        if not minutes.strip().isdigit():
+            return RedirectResponse(f"/projects/{slug}?error=Type+a+number+of+minutes.", status_code=303)
+        return pipeline_action(slug, lambda flow: flow.set_heartbeat_minutes(slug, int(minutes)))
+
+    @app.get("/projects/{slug}/agents/{name}", response_class=HTMLResponse)
+    def agent_page(request: Request, slug: str, name: str):
+        project = known(slug)
+        runner = get_chats()
+        agent = next((a for a in runner.refresh(slug) if a.name == name), None) if (project and runner) else None
+        if agent is None:
+            return RedirectResponse(f"/projects/{slug}" if project else "/", status_code=303)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "agent.html",
+            {
+                "page": "home",
+                "project": project,
+                "agent": agent,
+                "chat": runner.transcript(slug, name),
+                "working": agent.status is Status.WORKING,
             },
         )
 
     @app.post("/projects/{slug}/message")
     def message_coordinator(slug: str, message: str = Form("")):
-        project = load_project(ws, slug) if slug in ws.project_slugs() else None
+        project = known(slug)
         runner = get_chats()
         if project is None:
             return RedirectResponse("/", status_code=303)
@@ -192,7 +262,7 @@ def create_app(
 
     @app.post("/projects/{slug}/stop")
     def stop_project(slug: str):
-        project = load_project(ws, slug) if slug in ws.project_slugs() else None
+        project = known(slug)
         runner = get_chats()
         if project is not None and runner is not None:
             try:
