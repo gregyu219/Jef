@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -27,14 +28,26 @@ from jef.usage import (
     budget_usd,
     format_cost,
     format_tokens,
+    latest_plan_usage,
     project_total,
     project_usage,
 )
 from jef.workspace import Workspace
 
+
+def format_reset(when: datetime, now: datetime) -> str:
+    """A reset time in local time: "3:00 pm" today, else "Fri 14 Nov, 9:00 am"."""
+    local, today = when.astimezone(), now.astimezone()
+    clock = f"{local.hour % 12 or 12}:{local.minute:02d} {'am' if local.hour < 12 else 'pm'}"
+    if local.date() == today.date():
+        return clock
+    return f"{local:%a} {local.day} {local:%b}, {clock}"
+
+
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 TEMPLATES.env.filters["tokens"] = format_tokens
 TEMPLATES.env.filters["cost"] = format_cost
+TEMPLATES.env.filters["reset"] = format_reset
 
 
 @dataclass
@@ -167,6 +180,9 @@ def create_app(
         backlog = Backlog.load(ws.backlog_file)
         jef_runner = get_jef_chats()
         jef_agent = jefchat.agent(jef_runner) if jef_runner else None
+        projects = summarize_projects(ws)
+        now = datetime.now(timezone.utc)
+        plan = latest_plan_usage(ws)
         return TEMPLATES.TemplateResponse(
             request,
             "home.html",
@@ -177,7 +193,11 @@ def create_app(
                 "jef_agent": jef_agent,
                 "jef_working": jef_agent is not None and jef_agent.status is Status.WORKING,
                 "backlog": backlog.items,
-                "projects": summarize_projects(ws),
+                "projects": projects,
+                "total_cost": sum(p.usage.cost_usd for p in projects),
+                "plan_usage": plan,
+                "plan_seen": ago((now - plan.seen_at).total_seconds()) if plan and plan.seen_at else "",
+                "now": now,
                 "statuses": list(TaskStatus),
                 "workspace": ws.root,
                 "claude": app.state.claude,
