@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-jef = "jef.cli:main"
+jef = "jef.cli:entry"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jef"]
