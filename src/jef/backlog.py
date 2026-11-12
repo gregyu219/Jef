@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Iterable
 
 from jef import mdtable
 
@@ -68,11 +69,14 @@ class Backlog:
             )
         return cls(items, doc)
 
-    def add(self, feature: str) -> BacklogItem:
+    def add(self, feature: str, reserved: Iterable[int] = ()) -> BacklogItem:
+        """Add a Waiting item with the next free number. ``reserved`` holds
+        numbers still in use elsewhere (a project's goal.md points at them),
+        even if their row has been deleted, so they're never handed out again."""
         feature = feature.strip()
         if not feature:
             raise ValueError("A backlog item needs a description.")
-        number = max((i.number for i in self.items), default=0) + 1
+        number = max([i.number for i in self.items] + list(reserved), default=0) + 1
         item = BacklogItem(number=number, feature=feature)
         self.items.append(item)
         return item

@@ -207,6 +207,37 @@ def test_start_page_remembers_repos_and_mentions_other_projects(env, client):
     assert "Weekly email summary (coordinator Ada, In progress)" in message
 
 
+def test_a_deleted_done_items_number_and_name_stay_with_its_project(env, client):
+    from jef.projects import projects_on_repo, set_goal_field, used_backlog_numbers
+
+    ws, chats, clone, procs, clones = env
+    # Item #2 (the highest number) is started, finishes, and its row is deleted.
+    done = start_project(ws, 2, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)
+    assert done.coordinator == "Ada"
+    set_goal_field(ws, done.slug, "Done", "yes")
+    backlog = Backlog.load(ws.backlog_file)
+    backlog.items = [i for i in backlog.items if i.number != 2]
+    backlog.save(ws.backlog_file)
+    assert used_backlog_numbers(ws) == {2}
+    # Its status still reads Done, from goal.md.
+    assert projects_on_repo(ws, "gregyu219/Jef") == [(load_project(ws, done.slug), "Done")]
+    # A new item doesn't take #2 back.
+    client.post("/backlog", data={"feature": "Dark mode again"})
+    assert [i.number for i in Backlog.load(ws.backlog_file).items] == [1, 3]
+    # And a new coordinator doesn't take Ada's name back.
+    assert start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical).coordinator == "Alan"
+    assert "Dark mode (coordinator Ada, Done)" in procs[-1].stdin_text
+
+
+def test_coordinator_names_used_by_project_folders_are_taken():
+    from jef.projects import COORDINATOR_NAMES, pick_coordinator_name
+
+    taken = set(COORDINATOR_NAMES[:-1])
+    assert pick_coordinator_name(Backlog(), taken=taken) == COORDINATOR_NAMES[-1]
+    taken = set(COORDINATOR_NAMES) | {f"Coordinator {len(COORDINATOR_NAMES) + 1}"}
+    assert pick_coordinator_name(Backlog(), taken=taken) == f"Coordinator {len(COORDINATOR_NAMES) + 2}"
+
+
 def test_a_repo_used_by_no_other_project_isnt_mentioned(env):
     ws, chats, clone, procs, clones = env
     start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)

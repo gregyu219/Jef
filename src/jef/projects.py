@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from jef import skills
 from jef.backlog import Backlog, BacklogItem, BacklogStatus
@@ -83,12 +83,21 @@ def slugify(text: str, taken: set[str]) -> str:
     return slug
 
 
-def pick_coordinator_name(backlog: Backlog, choose: Callable[[list[str]], str] = random.choice) -> str:
-    used = {i.coordinator for i in backlog.items}
+def pick_coordinator_name(
+    backlog: Backlog,
+    choose: Callable[[list[str]], str] = random.choice,
+    taken: Iterable[str] = (),
+) -> str:
+    """A name no project has used. ``taken`` holds names from project folders,
+    so a project whose backlog row was deleted keeps its name to itself."""
+    used = {i.coordinator for i in backlog.items if i.coordinator} | {n for n in taken if n}
     free = [name for name in COORDINATOR_NAMES if name not in used]
     if free:
         return choose(free)
-    return f"Coordinator {len(used) + 1}"
+    n = len(used) + 1
+    while f"Coordinator {n}" in used:
+        n += 1
+    return f"Coordinator {n}"
 
 
 def agent_name(display: str) -> str:
@@ -173,8 +182,29 @@ def load_project(ws: Workspace, slug: str) -> Project | None:
     return Project(slug, fields.get("name", slug), fields.get("repo", ""), fields.get("coordinator", ""))
 
 
+def used_backlog_numbers(ws: Workspace) -> set[int]:
+    """Backlog numbers that projects' goal.md files point at ("Backlog item: #N")."""
+    numbers = set()
+    for slug in ws.project_slugs():
+        value = goal_fields(ws, slug).get("backlog item", "").removeprefix("#")
+        if value.isdigit():
+            numbers.add(int(value))
+    return numbers
+
+
+def used_coordinator_names(ws: Workspace) -> set[str]:
+    """Coordinator names that projects' goal.md files already use."""
+    names = set()
+    for slug in ws.project_slugs():
+        project = load_project(ws, slug)
+        if project and project.coordinator:
+            names.add(project.coordinator)
+    return names
+
+
 def projects_on_repo(ws: Workspace, repo: str, exclude: str = "") -> list[tuple[Project, str]]:
-    """Other Jef projects that use this repo, with their backlog status."""
+    """Other Jef projects that use this repo, with their backlog status. If a
+    finished project's backlog row has been deleted, goal.md still says Done."""
     backlog = {f"#{i.number}": i.status.value for i in Backlog.load(ws.backlog_file).items}
     found = []
     for slug in ws.project_slugs():
@@ -182,7 +212,10 @@ def projects_on_repo(ws: Workspace, repo: str, exclude: str = "") -> list[tuple[
             continue
         project = load_project(ws, slug)
         if project and project.repo.lower() == repo.lower():
-            status = backlog.get(goal_fields(ws, slug).get("backlog item", ""), "")
+            fields = goal_fields(ws, slug)
+            status = backlog.get(fields.get("backlog item", ""), "")
+            if not status and fields.get("done", "").lower() == "yes":
+                status = BacklogStatus.DONE.value
             found.append((project, status))
     return found
 
@@ -238,7 +271,7 @@ def start_project(
     repo = parse_repo(repo_text)
 
     slug = slugify(item.feature, set(ws.project_slugs()))
-    coordinator = pick_coordinator_name(backlog, choose_name)
+    coordinator = pick_coordinator_name(backlog, choose_name, used_coordinator_names(ws))
     folder = ws.project_dir(slug)
     folder.mkdir(parents=True)
     try:
