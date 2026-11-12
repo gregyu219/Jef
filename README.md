@@ -68,6 +68,8 @@ Jef has four levels. Each one hands work to the level below it and keeps track o
 4. **Build.** The coordinator starts one implementation agent per task, one at a time. It reads each implementer's replies, nudges it on its heartbeat, has Jef open the PR when it's ready, and checks the PR on GitHub. After a merge it starts the next task, revising the ones that are left if what merged changed the picture. If a PR gets merge conflicts, it has the implementer rebase, and Jef pushes the fix to the same PR. The project page shows who started each agent.
 5. **Review.** You review each PR on GitHub and merge it. If one misses the point, chat with its coordinator by name and it will revise the work or start over.
 
+**Deleting.** Every backlog item and every project has a **Delete** button, whatever state it's in, and asks you to confirm first. Deleting a project, or a backlog item that has one, stops its agents, deletes its local folder (`~/.jef/projects/<slug>/`: the clone, worktrees, chats, tasks and cost history) and removes its backlog row. Its branches and PRs on GitHub stay.
+
 ### Task statuses
 
 Every task in a project's status table is in one of five states:

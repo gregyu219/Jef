@@ -466,6 +466,15 @@ class Chats:
         save_roster(self.workspace, project, agents)
         return to_stop
 
+    def stop_project(self, project: str) -> None:
+        """End every running turn in a project that is being deleted, and
+        forget them. agents.md isn't touched: it goes with the folder."""
+        with self.lock:
+            for key in [k for k in self._running if k[0] == project]:
+                proc = self._running.pop(key)
+                if proc.poll() is None:
+                    proc.terminate()
+
     def stop_running_turns(self) -> None:
         """When Jef shuts down, end the turns still running. Their agents show
         as Idle next time, and the heartbeat picks them up again."""

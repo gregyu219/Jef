@@ -238,6 +238,61 @@ def test_coordinator_names_used_by_project_folders_are_taken():
     assert pick_coordinator_name(Backlog(), taken=taken) == f"Coordinator {len(COORDINATOR_NAMES) + 2}"
 
 
+def test_deleting_a_running_project_stops_its_agents_and_removes_everything(env):
+    from jef.pipeline import Pipeline
+    from jef.projects import delete_project
+
+    ws, chats, clone, procs, clones = env
+    project = start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)
+    other = start_project(ws, 2, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)
+    folder = ws.project_dir(project.slug)
+    chats.spawn(project.slug, "research", Role.RESEARCH, "Look around", folder / "repo", parent="ada")
+    (folder / "work" / "impl-1").mkdir(parents=True)
+    assert not any(p.done for p in procs)
+
+    delete_project(ws, project.slug, chats)
+
+    assert not folder.exists()
+    assert procs[0].done and procs[2].done  # Ada and her research agent
+    assert not procs[1].done  # the other project's coordinator carries on
+    assert not any(key[0] == project.slug for key in chats._running)
+    assert [(i.number, i.status) for i in Backlog.load(ws.backlog_file).items] == [(2, BacklogStatus.IN_PROGRESS)]
+    assert ws.project_slugs() == [other.slug]
+    # The heartbeat finds nothing to do for it, and doesn't bring the folder back.
+    flow = Pipeline(ws, chats)
+    flow.tick(project.slug)
+    flow.write_status(project.slug)
+    flow.forget(project.slug)
+    assert not folder.exists()
+
+
+def test_deleting_a_done_project_whose_row_is_already_gone(env):
+    from jef.projects import delete_project
+
+    ws, chats, clone, procs, clones = env
+    project = start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)
+    procs[0].done = True
+    Backlog().save(ws.backlog_file)
+    delete_project(ws, project.slug)  # no Chats needed
+    assert ws.project_slugs() == []
+    assert Backlog.load(ws.backlog_file).items == []
+
+
+def test_delete_project_refuses_anything_but_a_project_folder(env, tmp_path):
+    from jef.projects import DeleteError, delete_project
+
+    ws, chats, clone, procs, clones = env
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    ws.projects_dir.mkdir(parents=True)
+    (ws.projects_dir / "link").symlink_to(outside, target_is_directory=True)
+    for slug in ("nope", "..", "../..", "link"):
+        with pytest.raises(DeleteError):
+            delete_project(ws, slug, chats)
+    assert outside.is_dir()
+    assert ws.backlog_file.exists()
+
+
 def test_a_repo_used_by_no_other_project_isnt_mentioned(env):
     ws, chats, clone, procs, clones = env
     start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)

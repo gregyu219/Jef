@@ -16,6 +16,7 @@ import random
 import re
 import shutil
 import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -181,6 +182,44 @@ def load_project(ws: Workspace, slug: str) -> Project | None:
     if not fields:
         return None
     return Project(slug, fields.get("name", slug), fields.get("repo", ""), fields.get("coordinator", ""))
+
+
+def project_for_backlog_item(ws: Workspace, number: int) -> str | None:
+    """The slug of the project started from backlog item ``number``, if any."""
+    for slug in ws.project_slugs():
+        if goal_fields(ws, slug).get("backlog item", "").lstrip("#").strip() == str(number):
+            return slug
+    return None
+
+
+class DeleteError(RuntimeError):
+    pass
+
+
+def delete_project(ws: Workspace, slug: str, chats: Chats | None = None) -> None:
+    """Delete a project, whatever state it is in: stop its agents' running
+    turns, delete its folder (clone, worktrees, chats, goal, tasks, status)
+    and remove its backlog row. Its branches and PRs on GitHub stay."""
+    if slug not in ws.project_slugs():
+        raise DeleteError(f"There's no project {slug!r}.")
+    folder = ws.project_dir(slug)
+    # Only ever a real folder directly inside projects/, never a link out of it.
+    if folder.is_symlink() or folder.resolve().parent != ws.projects_dir.resolve():
+        raise DeleteError(f"{slug!r} isn't a project folder Jef can delete.")
+    # Under the lock, so the heartbeat can't start a turn in it meanwhile.
+    with chats.lock if chats is not None else nullcontext():
+        if chats is not None:
+            chats.stop_project(slug)
+        number = goal_fields(ws, slug).get("backlog item", "").lstrip("#").strip()
+        try:
+            shutil.rmtree(folder)
+        except OSError as err:
+            raise DeleteError(f"Couldn't delete {folder}: {err}") from err
+        backlog = Backlog.load(ws.backlog_file)
+        kept = [i for i in backlog.items if str(i.number) != number]
+        if len(kept) != len(backlog.items):
+            backlog.items = kept
+            backlog.save(ws.backlog_file)
 
 
 def used_backlog_numbers(ws: Workspace) -> set[int]:

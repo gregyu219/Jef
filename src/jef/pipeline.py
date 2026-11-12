@@ -333,6 +333,12 @@ class Pipeline:
             self.write_status(slug)
             self._last_checked[slug] = self.now()
 
+    def forget(self, slug: str) -> None:
+        """Drop what Jef remembers about a project that has been deleted."""
+        with self.chats.lock:
+            for remembered in (self._last_wake, self._events, self._last_checked, self._budget_checked):
+                remembered.pop(slug, None)
+
     def last_checked(self, slug: str) -> float | None:
         """When you last pressed "Check status now", if Jef has run since."""
         return self._last_checked.get(slug)

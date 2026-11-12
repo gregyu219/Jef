@@ -18,7 +18,20 @@ from jef.chats import Agent, Chats, ChatError, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
 from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError, pr_label
-from jef.projects import StartError, gh_clone, goal_fields, known_repos, load_project, parse_repo, projects_on_repo, start_project, used_backlog_numbers
+from jef.projects import (
+    DeleteError,
+    StartError,
+    delete_project,
+    gh_clone,
+    goal_fields,
+    known_repos,
+    load_project,
+    parse_repo,
+    project_for_backlog_item,
+    projects_on_repo,
+    start_project,
+    used_backlog_numbers,
+)
 from jef.status import NEEDS_REVIEW, Attention, needs_you, read_status, status_path, write_status
 from jef.tasks import TaskList, TaskStatus
 from jef.usage import (
@@ -51,6 +64,11 @@ TEMPLATES.env.filters["cost"] = format_cost
 TEMPLATES.env.filters["rate"] = format_rate
 TEMPLATES.env.filters["reset"] = format_reset
 TEMPLATES.env.filters["pr_label"] = pr_label
+# Said by every Delete button that takes a project with it.
+TEMPLATES.env.globals["project_delete_note"] = (
+    "This stops its agents, deletes its local folder (clone, chats, tasks and its cost history) "
+    "and removes it from the backlog. Its GitHub branches and PRs stay."
+)
 
 # The project page's model form: each level's field name and label.
 MODEL_FORM: dict[Role, tuple[str, str]] = {
@@ -252,9 +270,9 @@ def create_app(
                 "claude": app.state.claude,
                 "coordinator_pages": coordinator_pages(),
                 "attention": backlog_attention(ws, backlog),
+                "item_projects": backlog_projects(ws),
                 "needs_review": NEEDS_REVIEW,
                 "waiting": BacklogStatus.WAITING,
-                "done": BacklogStatus.DONE,
                 "error": error,
                 "status_read": status == "read",
             },
@@ -316,15 +334,37 @@ def create_app(
     def find_item(number: int):
         return next((i for i in Backlog.load(ws.backlog_file).items if i.number == number), None)
 
+    def remove_project(slug: str) -> None:
+        """Stop the project's agents, delete its folder and its backlog row."""
+        delete_project(ws, slug, get_chats())
+        if app.state.pipeline is not None:
+            app.state.pipeline.forget(slug)
+
     @app.post("/backlog/{number}/delete")
     def delete_backlog_item(number: int):
-        backlog = Backlog.load(ws.backlog_file)
+        """Delete an item in any state. If it has a project, that goes too."""
+        slug = project_for_backlog_item(ws, number)
         try:
-            backlog.remove(number)
-        except ValueError:
+            if slug is not None:
+                remove_project(slug)
+            else:
+                backlog = Backlog.load(ws.backlog_file)
+                backlog.remove(number)
+                backlog.save(ws.backlog_file)
+        except (ValueError, DeleteError):
             return RedirectResponse("/?error=delete", status_code=303)
-        backlog.save(ws.backlog_file)
         return RedirectResponse("/", status_code=303)
+
+    @app.post("/projects/{slug}/delete")
+    def delete_project_page(slug: str):
+        # Any project folder, even a broken one with no goal.md, can go.
+        if slug not in ws.project_slugs():
+            return RedirectResponse("/", status_code=303)
+        try:
+            remove_project(slug)
+        except DeleteError:
+            return RedirectResponse("/?error=project-delete#projects", status_code=303)
+        return RedirectResponse("/#projects", status_code=303)
 
     @app.get("/backlog/{number}/start", response_class=HTMLResponse)
     def start_form(request: Request, number: int, error: str = "", repo: str = ""):

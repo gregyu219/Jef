@@ -174,4 +174,13 @@
       <button type="submit" class="secondary">{{ "Turn off" if coordinator_decides else "Turn on" }} {{ project.coordinator }}'s heartbeat approval</button>
     </form>
   </section>
+
+  <section>
+    <h2>Delete project</h2>
+    <p class="hint">{{ project_delete_note }}</p>
+    <form method="post" action="/projects/{{ project.slug }}/delete"
+          onsubmit='return confirm({{ ("Delete “" ~ project.name ~ "”? " ~ project_delete_note) | tojson }})'>
+      <button type="submit" class="secondary" aria-label="Delete project {{ project.name }}">Delete this project</button>
+    </form>
+  </section>
 {% endblock %}
