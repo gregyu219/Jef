@@ -63,7 +63,7 @@
     a.cancel { color: var(--muted); margin-left: 12px; }
     a.start { font-weight: 600; color: var(--accent); }
     .pill.idle { color: var(--done); } .pill.working { color: var(--progress); } .pill.stopped { color: var(--waiting); }
-    ol.chat { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+    ol.chat { list-style: none; padding: 8px; margin: 0; display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border); border-radius: 8px; }
     ol.chat li { padding: 8px 12px; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
     ol.chat li.sent { background: color-mix(in srgb, var(--accent) 12%, transparent); align-self: flex-end; max-width: 85%; }
     ol.chat li.text { background: var(--bg); border: 1px solid var(--border); }
@@ -94,5 +94,27 @@
   </header>
 {% block content %}{% endblock %}
 </main>
+<script>
+  // Chats open at the newest message. If you had scrolled up to read, a
+  // refresh puts you back where you were; sending a message jumps to the end.
+  (() => {
+    const chats = [...document.querySelectorAll("ol.chat")];
+    const key = (i) => "jef-chat:" + location.pathname + ":" + i;
+    let sending = false;
+    chats.forEach((c, i) => {
+      let saved = null;
+      try { saved = JSON.parse(sessionStorage.getItem(key(i))); } catch (e) {}
+      c.scrollTop = saved && !saved.atBottom ? saved.top : c.scrollHeight;
+    });
+    document.addEventListener("submit", () => { sending = true; });
+    addEventListener("beforeunload", () => {
+      chats.forEach((c, i) => {
+        if (sending) { sessionStorage.removeItem(key(i)); return; }
+        const atBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 20;
+        sessionStorage.setItem(key(i), JSON.stringify({ top: c.scrollTop, atBottom }));
+      });
+    });
+  })();
+</script>
 </body>
 </html>
