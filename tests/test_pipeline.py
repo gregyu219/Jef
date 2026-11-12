@@ -230,14 +230,19 @@ def test_from_go_to_done(w):
     impl = w.agent("impl-1")
     assert impl.folder.endswith("work/impl-1") and impl.parent == "ada" and impl.note == "Started by Ada"
     assert "Your coordinator is Ada" in w.last_message("impl-1")
-    assert "Task 1 isn't merged yet" in w.refused("start", number="2")
+    assert w.refused("start", number="2") == (
+        "Task 1 is still being built, and this project builds 1 task at a time. "
+        "Start the next one once its PR is open."
+    )
     w.reply("ada", "Task 1 is underway.")
 
     # impl-1 finishes: Ada is woken, reads it, and has Jef open the PR.
     w.reply("impl-1", READY)
     assert "impl-1 finished a turn" in w.last_message("ada")
     assert "## What this does" in last_reply(w.ws, slug, "impl-1")
-    assert w.ok("publish", number="1") == f"Opened PR #20: {PR20}"
+    assert w.ok("publish", number="1") == (
+        f"Opened PR #20: {PR20}. You can start the next task now, unless it needs this one's code."
+    )
     assert w.publisher.calls[0][:3] == (f"jef/{slug}/task-1", "main", "Show the version")
     task = p.tasks(slug).tasks[0]
     assert (task.status, task.pr) == (TaskStatus.PENDING_REVIEW, PR20)
@@ -430,7 +435,7 @@ def test_a_new_pr_links_the_closed_one(w):
     w.publisher.open.clear()  # GitHub has no open PR for the branch any more
     w.ok("send", agent="impl-1", message="The PR was closed; let's open it again")
     w.reply("impl-1", READY)
-    assert w.ok("publish", number="1") == f"Opened PR #21: {PR21}"
+    assert w.ok("publish", number="1").startswith(f"Opened PR #21: {PR21}")
     assert w.publisher.calls[-1][3].startswith(f"Replaces {PR20}, which was closed without merging.")
 
 
@@ -607,7 +612,10 @@ def test_tasks_run_side_by_side_up_to_the_limit(w):
     w.ok("start", number="2")
     assert w.git.worktrees == [(f"jef/{slug}/task-1", "main"), (f"jef/{slug}/task-2", "main")]
     assert w.agent("impl-1").status is Status.WORKING and w.agent("impl-2").status is Status.WORKING
-    assert w.refused("start", number="3") == "Tasks 1 and 2 aren't merged yet, and this project builds at most 2 tasks at a time."
+    assert w.refused("start", number="3") == (
+        "Tasks 1 and 2 are still being built, and this project builds at most 2 tasks at a time. "
+        "Start the next one once one of their PRs is open."
+    )
     w.reply("ada", "Started tasks 1 and 2.")
 
     # Both finish while Ada is busy: she hears about both in one wake.
@@ -621,15 +629,33 @@ def test_tasks_run_side_by_side_up_to_the_limit(w):
     assert "- Implementers at once: 2" in wake
     w.ok("publish", number="1")
     w.ok("publish", number="2")
-    assert w.refused("start", number="3").startswith("Tasks 1 and 2 aren't merged yet")
-    w.reply("ada", "Opened both PRs.")
 
-    # One merges: there's room for task 3.
-    w.pr_states[PR20] = "MERGED"
-    w.ok("prs")
+    # PRs waiting for review don't count toward the limit: task 3 can start.
     w.ok("start", number="3")
-    assert w.agent("impl-3").note == "Started by Ada after PR #20 merged"
-    assert [t.status for t in p.tasks(slug).tasks] == [TaskStatus.MERGED, TaskStatus.PENDING_REVIEW, TaskStatus.IMPLEMENTATION]
+    assert w.agent("impl-3").note == "Started by Ada"
+    assert [t.status for t in p.tasks(slug).tasks] == [
+        TaskStatus.PENDING_REVIEW, TaskStatus.PENDING_REVIEW, TaskStatus.IMPLEMENTATION
+    ]
+
+
+def test_the_next_task_starts_once_the_last_pr_is_open(w):
+    p, slug = w.pipeline, w.slug
+    tasks_waiting(w, ("A", "B", "C"))
+    p.approve_tasks(slug)
+    p.tick(slug)
+    w.ok("start", number="1")
+    assert "Task 1 is still being built" in w.refused("start", number="2")
+    w.reply("ada", "Started task 1.")
+    w.reply("impl-1", READY)
+    w.reply("ada", "Reading it.")
+    assert "You can start the next task now" in w.ok("publish", number="1")
+
+    # Nothing has merged, and the limit is 1, yet task 2 starts.
+    w.ok("start", number="2")
+    assert [t.status for t in p.tasks(slug).tasks] == [
+        TaskStatus.PENDING_REVIEW, TaskStatus.IMPLEMENTATION, TaskStatus.NOT_STARTED
+    ]
+    assert "Task 2 is still being built" in w.refused("start", number="3")
 
 
 def test_overview_shows_implementers_at_once(w):
@@ -791,7 +817,7 @@ def test_web_implementers_form(w):
 def test_web_page_text_follows_implementers_at_once(w):
     c = client(w)
     building(w)
-    assert "starts the next task." in c.get(f"/projects/{w.slug}").text
+    assert "starts the next task as soon as a PR is open" in c.get(f"/projects/{w.slug}").text
     w.pipeline.set_implementers_at_once(w.slug, 2)
     page = c.get(f"/projects/{w.slug}").text
     assert "whichever tasks are ready, up to 2 at once" in page

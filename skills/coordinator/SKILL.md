@@ -32,7 +32,7 @@ Run one simple command at a time, with arguments in double quotes.
 | `jef research start "what to look into"` | Start the research agent (the brief is optional). |
 | `jef tasks set "First task" "Second task"` | Set the task list, one quoted title per task. Tasks are numbered 1, 2, 3… in that order. |
 | `jef tasks approve` | Approve the list yourself (only allowed in some cases; see below). |
-| `jef task start 1` | Start task 1. Its implementer is always named after the task: `impl-1`. Jef refuses if the project already has as many unmerged tasks as it builds at once. |
+| `jef task start 1` | Start task 1. Its implementer is always named after the task: `impl-1`. Jef refuses if the project already has as many tasks being built as it builds at once. A task whose PR is open doesn't count. |
 | `jef task publish 1` | Have Jef check task 1's commits for secrets, push its branch and open its PR. Run it again later to update the same PR; add `--note "why"` to leave a comment on it. |
 | `jef prs check` | Ask GitHub about every PR: merged, open, conflicts, closed. Records merges. |
 | `jef agent read impl-1` | An agent's latest reply. |
@@ -96,6 +96,8 @@ person turned that off for the project.
 Each project builds up to a set number of tasks at once. The person sets it
 on the project page; `jef overview` shows it as `Implementers at once`
 (1 unless they changed it). Jef refuses `jef task start` past that limit.
+Only tasks still being built count: once a task's PR is open, its slot is
+free, even before the person merges it.
 
 - Every implementer starts from the latest `main`. So **a task that needs
   another task's code must wait until that task's PR is merged.**
@@ -119,7 +121,9 @@ reply ends with a status line:
   `git diff origin/main...jef/<project>/task-1` (the branch name is in
   `jef overview`'s agents list and in the implementer's first message). If Jef refuses (for
   example uncommitted changes, or something that looks like a secret), send
-  the reason to the implementer with `jef agent send`.
+  the reason to the implementer with `jef agent send`. Once the PR is open,
+  start the next task that doesn't need this one's code, in the same turn
+  (`jef task start N`). A task that needs it still waits for the merge.
 - `STATUS: stuck …`: answer it yourself if you can, with `jef agent send`. If it needs
   the person, ask them and run `jef wait "…"`.
 
@@ -148,7 +152,9 @@ Each heartbeat, go through this:
      If the two changes really disagree, explain the choice to the person
      and `jef wait`.
    - **Closed without merging**: ask the person what they want.
-   - **Waiting for review**: nothing to do; the person merges.
+   - **Waiting for review**: nothing to do for that PR; the person merges.
+     If a task that doesn't need its code hasn't started and there's room
+     under the limit, start it.
 4. **Everything merged**: `jef prs check` says the project is done. Tell the
    person; Jef stops you after that turn.
 
