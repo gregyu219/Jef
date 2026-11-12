@@ -170,6 +170,7 @@ def create_app(
     pipeline: Pipeline | None = None,
     choose_name: Callable[[list[str]], str] = random.choice,
     jef_chats: Chats | None = None,
+    on_agents_ready: Callable[[Pipeline], None] | None = None,
 ) -> FastAPI:
     """``claude_status`` is the result of the check ``jef`` ran on startup, if any."""
     ws = workspace or Workspace.default()
@@ -199,10 +200,17 @@ def create_app(
         return app.state.jef_chats
 
     def get_pipeline() -> Pipeline | None:
+        """Projects can only run once Claude Code works. The first time it
+        does (at start, or after Check again), ``on_agents_ready`` starts
+        Jef's timer."""
         runner = get_chats()
         if app.state.pipeline is None and runner is not None:
             app.state.pipeline = Pipeline(ws, runner)
+            if on_agents_ready is not None:
+                on_agents_ready(app.state.pipeline)
         return app.state.pipeline
+
+    app.state.get_pipeline = get_pipeline
 
     def known(slug: str):
         return load_project(ws, slug) if slug in ws.project_slugs() else None
@@ -537,6 +545,7 @@ def create_app(
     @app.post("/settings/claude-check")
     def check_claude_again():
         app.state.claude = claude_check()
+        get_pipeline()  # if it works now, agents (and Jef's timer) can start
         return RedirectResponse("/settings?notice=checked", status_code=303)
 
     return app

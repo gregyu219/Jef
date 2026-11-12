@@ -238,7 +238,9 @@ def test_settings_shows_claude_code_is_working(ws):
 def test_broken_claude_code_shows_what_to_do(ws):
     app = create_app(ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(False, "failed", "Not logged in"))
     c = TestClient(app)
-    assert "can't run until Claude Code works" in c.get("/").text
+    home = c.get("/").text
+    assert "Claude Code isn't working, so agents can't run." in home and "It said: Not logged in" in home
+    assert "Backlog" in home  # the rest of the home page still works
     settings = c.get("/settings").text
     assert "Not logged in" in settings and "/login" in settings
 
@@ -263,3 +265,22 @@ def test_settings_shows_github_account(client):
 def test_settings_explains_missing_github_login(ws):
     app = create_app(ws, github_check=lambda: GitHubStatus(True, ""))
     assert "gh auth login" in TestClient(app).get("/settings").text
+
+
+def test_agents_start_once_check_again_works(ws):
+    ready = []
+    results = [ClaudeCheck(False, "failed", "Not logged in"), ClaudeCheck(True, path="/bin/claude")]
+    app = create_app(
+        ws,
+        github_check=lambda: GitHubStatus(True, "o"),
+        claude_status=results[0],
+        claude_check=lambda: results[1],
+        on_agents_ready=ready.append,
+    )
+    c = TestClient(app)
+    assert app.state.get_pipeline() is None and ready == []
+    c.post("/settings/claude-check")
+    assert len(ready) == 1 and ready[0] is app.state.pipeline  # Jef's timer starts now
+    c.post("/settings/claude-check")
+    assert len(ready) == 1  # only once
+    assert "Claude Code isn't working" not in c.get("/").text
