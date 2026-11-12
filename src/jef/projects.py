@@ -242,11 +242,14 @@ def first_message(item: BacklogItem, repo: str, coordinator: str, others: list[t
         f"The request: {item.feature}\n"
         f"The repo: {repo} (your working folder is a fresh clone of it)\n\n"
     )
-    if others:
+    # Finished projects' work is already merged into the repo, so naming each
+    # one only costs context. List just the ones still going.
+    active = [(p, status) for p, status in others if status != BacklogStatus.DONE.value]
+    if active:
         message += (
-            "This repo is already part of other Jef projects. Their work may already be in the "
-            "repo, or still in open PRs, so check for overlap and build on it:\n"
-            + "".join(f"- {p.name} (coordinator {p.coordinator}, {status or 'status unknown'})\n" for p, status in others)
+            "Other Jef projects are still working on this repo. Their work may be in open PRs, "
+            "so check for overlap and build on it:\n"
+            + "".join(f"- {p.name} (coordinator {p.coordinator}, {status or 'status unknown'})\n" for p, status in active)
             + "\n"
         )
     return message + (

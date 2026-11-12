@@ -19,9 +19,9 @@ from datetime import datetime
 from typing import Callable
 
 from jef import skills
-from jef.backlog import Backlog
+from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Agent, Chats, Role, load_roster, save_roster
-from jef.projects import load_project
+from jef.projects import goal_fields, load_project
 from jef.tasks import TaskList, TaskStatus
 from jef.workspace import Workspace
 
@@ -45,15 +45,22 @@ def context_message(ws: Workspace) -> str:
         "## Backlog",
     ]
     items = Backlog.load(ws.backlog_file).items
-    if items:
-        for item in items:
-            who = f", coordinator {item.coordinator}" if item.coordinator else ""
-            lines.append(f"- #{item.number} {item.feature} ({item.status.value}{who})")
-    else:
+    # Finished work is only counted, not listed: the briefing stays short as
+    # projects pile up, and Jef can still read the files when asked.
+    open_items = [i for i in items if i.status is not BacklogStatus.DONE]
+    for item in open_items:
+        who = f", coordinator {item.coordinator}" if item.coordinator else ""
+        lines.append(f"- #{item.number} {item.feature} ({item.status.value}{who})")
+    if len(open_items) < len(items):
+        lines.append(f"- {len(items) - len(open_items)} done (see backlog.md)")
+    if not items:
         lines.append("- (empty)")
     lines += ["", "## Projects"]
     slugs = ws.project_slugs()
+    finished = [s for s in slugs if goal_fields(ws, s).get("done", "").lower() == "yes"]
     for slug in slugs:
+        if slug in finished:
+            continue
         project = load_project(ws, slug)
         tasks = TaskList.load(ws.project_dir(slug) / "tasks.md")
         merged = tasks.counts()[TaskStatus.MERGED]
@@ -64,6 +71,8 @@ def context_message(ws: Workspace) -> str:
             f"- {name} (folder projects/{slug}, repo {repo}, coordinator {coordinator}, "
             f"{merged} of {len(tasks.tasks)} tasks merged)"
         )
+    if finished:
+        lines.append(f"- {len(finished)} finished (folders: {', '.join(finished)})")
     if not slugs:
         lines.append("- (none yet)")
     lines += [

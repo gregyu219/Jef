@@ -62,6 +62,21 @@ def test_context_message_briefs_on_backlog_and_projects(env):
     assert str(ws.root) in text
 
 
+def test_context_message_only_counts_finished_work(env):
+    ws, _, _ = env
+    backlog = Backlog.load(ws.backlog_file)
+    backlog.items[1].status = BacklogStatus.DONE
+    backlog.save(ws.backlog_file)
+    old = ws.project_dir("dark-mode")
+    old.mkdir(parents=True)
+    (old / "goal.md").write_text("# Goal: Dark mode\n\n- Repo: octo/mail\n- Coordinator: Bea\n- Done: yes\n")
+    text = jefchat.context_message(ws)
+    assert "Dark mode (" not in text and "coordinator Bea" not in text
+    assert "- 1 done (see backlog.md)" in text
+    assert "- 1 finished (folders: dark-mode)" in text
+    assert "Weekly email summary" in text
+
+
 def test_context_message_with_nothing_yet(tmp_path):
     text = jefchat.context_message(Workspace(tmp_path))
     assert "(empty)" in text and "(none yet)" in text

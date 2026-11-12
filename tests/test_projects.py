@@ -203,7 +203,7 @@ def test_start_page_remembers_repos_and_mentions_other_projects(env, client):
     # The new coordinator is told about the other project on the same repo.
     client.post("/backlog/2/start", data={"repo": "https://github.com/gregyu219/Jef", "confirm": "yes"})
     message = procs[-1].stdin_text
-    assert "already part of other Jef projects" in message
+    assert "Other Jef projects are still working on this repo" in message
     assert "Weekly email summary (coordinator Ada, In progress)" in message
 
 
@@ -226,7 +226,9 @@ def test_a_deleted_done_items_number_and_name_stay_with_its_project(env, client)
     assert [i.number for i in Backlog.load(ws.backlog_file).items] == [1, 3]
     # And a new coordinator doesn't take Ada's name back.
     assert start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical).coordinator == "Alan"
-    assert "Dark mode (coordinator Ada, Done)" in procs[-1].stdin_text
+    # Ada's project is finished, so Alan isn't told about it: its work is already merged.
+    assert "Dark mode" not in procs[-1].stdin_text
+    assert "Other Jef projects" not in procs[-1].stdin_text
 
 
 def test_coordinator_names_used_by_project_folders_are_taken():
