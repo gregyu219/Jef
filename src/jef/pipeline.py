@@ -37,7 +37,6 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -52,6 +51,7 @@ from jef.projects import (
     set_goal_field,
 )
 from jef.publish import Publisher, PublishError
+from jef.status import Phase, project_phase, write_status
 from jef.tasks import Task, TaskList, TaskStatus
 from jef.workspace import Workspace
 
@@ -73,16 +73,6 @@ STATUS_LINE = re.compile(r"^\s*STATUS:\s*(working|ready|pr-opened|stuck)\b(.*)$"
 PR_BLOCK = re.compile(r"```pr\s*\n(.*?)```", re.S | re.I)
 MAX_PUBLISH_ATTEMPTS = 3
 PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
-
-
-class Phase(str, Enum):
-    UNDERSTANDING = "Understanding"
-    RESEARCH = "Research"
-    PLANNING = "Planning"
-    APPROVAL = "Waiting for your approval"
-    BUILDING = "Building"
-    DONE = "Done"
-    STOPPED = "Stopped"
 
 
 class PipelineError(RuntimeError):
@@ -232,23 +222,12 @@ class Pipeline:
             self._last_beat[slug] = self.now()
 
     def phase(self, slug: str) -> Phase:
-        fields = goal_fields(self.workspace, slug)
-        if fields.get("done", "").lower() == "yes":
-            return Phase.DONE
-        project = load_project(self.workspace, slug)
-        coordinator = self._agent(slug, project.coordinator_agent) if project else None
-        if coordinator is not None and coordinator.status is Status.STOPPED:
-            return Phase.STOPPED
-        if fields.get("tasks approved", "").lower() == "yes":
-            return Phase.BUILDING
-        if self.tasks(slug).tasks:
-            return Phase.APPROVAL
-        research = fields.get("research", "").lower()
-        if research == "done":
-            return Phase.PLANNING
-        if research == "started":
-            return Phase.RESEARCH
-        return Phase.UNDERSTANDING
+        return project_phase(self.workspace, slug, self.chats.refresh(slug))
+
+    def write_status(self, slug: str) -> bool:
+        """Rewrite projects/<slug>/status.md from the files, if it changed."""
+        with self.chats.lock:
+            return write_status(self.workspace, slug, self.chats.refresh(slug))
 
     def _agent(self, slug: str, name: str) -> Agent | None:
         return next((a for a in self.chats.refresh(slug) if a.name == name), None)
@@ -270,6 +249,7 @@ class Pipeline:
                 instructions=skills.load("research"),
             )
             set_goal_field(self.workspace, slug, "Research", "started")
+            self.write_status(slug)
 
     def approve_tasks(self, slug: str) -> None:
         with self.chats.lock:
@@ -277,6 +257,7 @@ class Pipeline:
                 raise PipelineError("There are no tasks waiting for approval.")
             set_goal_field(self.workspace, slug, "Tasks approved", "yes")
             self._build(slug)
+            self.write_status(slug)
 
     # -- the heartbeat
 
@@ -323,6 +304,7 @@ class Pipeline:
             # reply it reads now is checked too. _last_beat is left alone.
             self._last_pr_check[slug] = float("-inf")
             self.tick(slug)
+            self.write_status(slug)
             self._last_checked[slug] = self.now()
 
     def last_checked(self, slug: str) -> float | None:
@@ -641,6 +623,11 @@ class Heartbeat:
                 self.pipeline.tick(slug)
             except Exception:  # One broken project mustn't stop the others.
                 log.exception("Heartbeat failed for project %s", slug)
+            try:
+                # Done and Stopped projects too, so their last status is written.
+                self.pipeline.write_status(slug)
+            except Exception:
+                log.exception("Couldn't write status.md for project %s", slug)
 
     def _loop(self) -> None:
         while not self._stop.wait(self.every):

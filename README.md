@@ -147,6 +147,9 @@ Everything lives in plain markdown in Jef's workspace, outside your code repos:
       research.md         findings and approach
       tasks.md            every task and its status
       agents.md           every agent: role, who spawned it, status, session
+      status.md           where the project is: its phase, the coordinator's state
+                          and each task's stage. Jef writes it from the files above
+                          on every heartbeat, with no AI call, so you can just read it
       chats/<agent>.jsonl each agent's full conversation
       research/           extra research for single tasks (rare)
       repo/               the coordinator's clone of the project's repo

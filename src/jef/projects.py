@@ -5,8 +5,9 @@ GitHub repo and confirm. Starting a project:
 
 1. creates ``projects/<slug>/`` with ``goal.md`` and an empty ``tasks.md``,
 2. clones the repo into ``projects/<slug>/repo`` with your ``gh`` login,
-3. spawns a named coordinator chat in that clone, and
-4. marks the backlog item *In progress* with the coordinator's name.
+3. spawns a named coordinator chat in that clone,
+4. writes a first ``status.md`` (see ``jef.status``), and
+5. marks the backlog item *In progress* with the coordinator's name.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Callable, Iterable
 
 from jef import skills
 from jef.backlog import Backlog, BacklogItem, BacklogStatus
-from jef.chats import Chats, ChatError, Role
+from jef.chats import Chats, ChatError, Role, load_roster
 from jef.tasks import TaskList
 from jef.workspace import Workspace
 
@@ -286,6 +287,9 @@ def start_project(
             folder / "repo",
             instructions=skills.load("coordinator"),
         )
+        from jef.status import write_status  # status.py imports this module
+
+        write_status(ws, slug, load_roster(ws, slug))
     except (StartError, ChatError, OSError, subprocess.SubprocessError) as err:
         shutil.rmtree(folder, ignore_errors=True)  # leave nothing half-started
         raise err if isinstance(err, StartError) else StartError(str(err)) from err
