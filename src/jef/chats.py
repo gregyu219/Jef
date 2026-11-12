@@ -23,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -32,7 +33,7 @@ from typing import Callable
 from jef import mdtable
 from jef.workspace import Workspace
 
-HEADERS = ["Name", "Role", "Parent", "Status", "Session", "Folder"]
+HEADERS = ["Name", "Role", "Parent", "Status", "Handled", "Note", "Session", "Folder"]
 
 # Agents keep their notes in Jef's project files, not in your personal Claude
 # Code memory, so switch Claude Code's auto memory off for them.
@@ -105,12 +106,20 @@ class Agent:
     folder: str
     parent: str = ""
     status: Status = Status.IDLE
+    handled: int = 0  # how many finished turns the heartbeat has acted on
+    note: str = ""  # the latest thing worth showing, like "PR opened" or why it's stuck
 
 
 @dataclass
 class ChatLine:
     kind: str  # "sent", "text", "tool", "result" or "error"
     text: str
+
+
+@dataclass
+class Reply:
+    text: str
+    is_error: bool = False
 
 
 class ChatError(RuntimeError):
@@ -139,6 +148,8 @@ def load_roster(ws: Workspace, project: str) -> list[Agent]:
                     folder=get("folder"),
                     parent=get("parent"),
                     status=Status(get("status") or Status.IDLE.value),
+                    handled=int(get("handled")) if get("handled").isdigit() else 0,
+                    note=get("note"),
                 )
             )
         except ValueError:
@@ -153,7 +164,9 @@ def save_roster(ws: Workspace, project: str, agents: list[Agent]) -> None:
     if not doc.headers:
         doc.before = [f"# Agents: {project}", ""]
     doc.headers = HEADERS
-    doc.rows = [[a.name, a.role.value, a.parent, a.status.value, a.session, a.folder] for a in agents]
+    doc.rows = [
+        [a.name, a.role.value, a.parent, a.status.value, str(a.handled), a.note, a.session, a.folder] for a in agents
+    ]
     path.write_text(mdtable.render(doc), encoding="utf-8")
 
 
@@ -166,6 +179,8 @@ class Chats:
     popen: Callable[..., subprocess.Popen] = subprocess.Popen
     new_session_id: Callable[[], str] = lambda: str(uuid.uuid4())
     _running: dict[tuple[str, str], subprocess.Popen] = field(default_factory=dict)
+    # The web pages and the heartbeat both change agents.md; one at a time.
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
     # ---- files
 
@@ -227,6 +242,10 @@ class Chats:
         instructions: str = "",
     ) -> Agent:
         """Start a new agent with its first message."""
+        with self.lock:
+            return self._spawn(project, name, role, message, folder, parent, instructions)
+
+    def _spawn(self, project, name, role, message, folder, parent, instructions) -> Agent:
         if not NAME_PATTERN.match(name):
             raise ChatError("Agent names use lowercase letters, numbers and dashes, like impl-2.")
         if not Path(folder).is_dir():
@@ -244,6 +263,10 @@ class Chats:
 
     def send(self, project: str, name: str, message: str, sender: str = "you", instructions: str = "") -> Agent:
         """Send another message to an agent, in the same conversation."""
+        with self.lock:
+            return self._send(project, name, message, sender, instructions)
+
+    def _send(self, project, name, message, sender, instructions) -> Agent:
         agents = self.refresh(project)
         agent = self._find(agents, name)
         if agent.status is Status.STOPPED:
@@ -257,6 +280,10 @@ class Chats:
 
     def refresh(self, project: str) -> list[Agent]:
         """Update statuses: an agent whose turn has ended is Idle again."""
+        with self.lock:
+            return self._refresh(project)
+
+    def _refresh(self, project: str) -> list[Agent]:
         agents = load_roster(self.workspace, project)
         changed = False
         for agent in agents:
@@ -274,6 +301,10 @@ class Chats:
 
     def stop(self, project: str, name: str) -> list[str]:
         """Stop an agent and every agent it spawned. Returns the names stopped."""
+        with self.lock:
+            return self._stop(project, name)
+
+    def _stop(self, project: str, name: str) -> list[str]:
         agents = self.refresh(project)
         self._find(agents, name)
         to_stop, queue = [], [name]
@@ -290,7 +321,40 @@ class Chats:
         save_roster(self.workspace, project, agents)
         return to_stop
 
+    def stop_running_turns(self) -> None:
+        """When Jef shuts down, end the turns still running. Their agents show
+        as Idle next time, and the heartbeat picks them up again."""
+        with self.lock:
+            for proc in self._running.values():
+                if proc.poll() is None:
+                    proc.terminate()
+            self._running.clear()
+
+    def update(self, project: str, agent: Agent) -> None:
+        """Save an agent's handled count and note."""
+        with self.lock:
+            agents = load_roster(self.workspace, project)
+            for i, existing in enumerate(agents):
+                if existing.name == agent.name:
+                    existing.handled, existing.note = agent.handled, agent.note
+            save_roster(self.workspace, project, agents)
+
     # ---- reading conversations
+
+    def replies(self, project: str, name: str) -> list[Reply]:
+        """The final reply of every finished turn, oldest first."""
+        path = self.chat_file(project, name)
+        if not path.exists():
+            return []
+        out = []
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "result":
+                out.append(Reply(str(event.get("result") or ""), bool(event.get("is_error"))))
+        return out
 
     def transcript(self, project: str, name: str) -> list[ChatLine]:
         path = self.chat_file(project, name)

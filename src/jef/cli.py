@@ -71,11 +71,27 @@ def cmd_run(args: argparse.Namespace) -> int:
         if status is None:
             return 1
 
+    from jef.chats import Chats
+    from jef.pipeline import Heartbeat, Pipeline
+    from jef.workspace import Workspace
+
+    ws = Workspace.default()
+    chats = Chats(ws, status.path)
+    pipeline = Pipeline(ws, chats)
+    heartbeat = Heartbeat(pipeline)
+    heartbeat.tick_all()  # pick up anything that finished while Jef was off
+    heartbeat.start()
+
     url = url_for(args.port)
     print(f"Jef is running at {url}  (press Ctrl+C to stop)")
     if not args.no_browser:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-    uvicorn.run(create_app(claude_status=status), host=HOST, port=args.port, log_level="warning")
+    try:
+        app = create_app(ws, claude_status=status, chats=chats, pipeline=pipeline)
+        uvicorn.run(app, host=HOST, port=args.port, log_level="warning")
+    finally:
+        heartbeat.stop()
+        chats.stop_running_turns()
     return 0
 
 

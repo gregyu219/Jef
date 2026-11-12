@@ -31,6 +31,8 @@ COORDINATOR_NAMES = [
     "Alan", "Radia", "Guido", "Hedy", "Edsger", "Katherine", "Donald", "Lynn",
 ]
 
+DEFAULT_HEARTBEAT_MINUTES = 60
+
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$")
 URL_PREFIXES = ("https://github.com/", "http://github.com/", "github.com/", "git@github.com:")
 
@@ -52,9 +54,26 @@ def parse_repo(text: str) -> str:
     return repo
 
 
+# Little words dropped from folder names, so "Show the version in the footer"
+# becomes "show-version-footer".
+STOPWORDS = {
+    "a", "an", "the", "in", "on", "of", "to", "for", "and", "or", "with", "into",
+    "at", "by", "from", "as", "is", "be", "it", "its", "my", "our", "this", "that",
+}
+MAX_SLUG_WORDS = 5
+MAX_SLUG_LENGTH = 40
+
+
 def slugify(text: str, taken: set[str]) -> str:
     words = re.findall(r"[a-z0-9]+", text.lower())
-    base = "-".join(words)[:40].strip("-") or "project"
+    words = [w for w in words if w not in STOPWORDS] or words
+    kept: list[str] = []
+    for word in words[:MAX_SLUG_WORDS]:
+        # Whole words only: stop before one would make the name too long.
+        if kept and len("-".join(kept + [word])) > MAX_SLUG_LENGTH:
+            break
+        kept.append(word[:MAX_SLUG_LENGTH])
+    base = "-".join(kept) or "project"
     slug, n = base, 2
     while slug in taken:
         slug, n = f"{base}-{n}", n + 1
@@ -101,24 +120,54 @@ def goal_text(item: BacklogItem, repo: str, coordinator: str) -> str:
         f"- Repo: {repo}\n"
         f"- Coordinator: {coordinator}\n"
         f"- Backlog item: #{item.number}\n"
-        f"- Started: {date.today().isoformat()}\n\n"
+        f"- Started: {date.today().isoformat()}\n"
+        f"- Heartbeat: {DEFAULT_HEARTBEAT_MINUTES} minutes\n\n"
         "## What you asked for\n\n"
         f"{item.feature}\n"
     )
 
 
-def load_project(ws: Workspace, slug: str) -> Project | None:
+def goal_fields(ws: Workspace, slug: str) -> dict[str, str]:
+    """The "- Key: value" lines at the top of goal.md, keys lowercased."""
     goal = ws.project_dir(slug) / "goal.md"
+    fields: dict[str, str] = {}
     if not goal.exists():
-        return None
-    name, fields = slug, {}
+        return fields
     for line in goal.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            break  # only the list under the title
         if line.startswith("# Goal:"):
-            name = line[len("# Goal:"):].strip()
+            fields["name"] = line[len("# Goal:"):].strip()
         elif line.startswith("- ") and ":" in line:
             key, value = line[2:].split(":", 1)
             fields[key.strip().lower()] = value.strip()
-    return Project(slug, name, fields.get("repo", ""), fields.get("coordinator", ""))
+    return fields
+
+
+def set_goal_field(ws: Workspace, slug: str, key: str, value: str) -> None:
+    """Add or change one "- Key: value" line at the top of goal.md."""
+    goal = ws.project_dir(slug) / "goal.md"
+    lines = goal.read_text(encoding="utf-8").splitlines()
+    new = f"- {key}: {value}"
+    last_field = None
+    for i, line in enumerate(lines):
+        if line.startswith("## "):
+            break
+        if line.startswith("- ") and ":" in line:
+            last_field = i
+            if line[2:].split(":", 1)[0].strip().lower() == key.lower():
+                lines[i] = new
+                goal.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                return
+    lines.insert((last_field + 1) if last_field is not None else 1, new)
+    goal.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def load_project(ws: Workspace, slug: str) -> Project | None:
+    fields = goal_fields(ws, slug)
+    if not fields:
+        return None
+    return Project(slug, fields.get("name", slug), fields.get("repo", ""), fields.get("coordinator", ""))
 
 
 def first_message(item: BacklogItem, repo: str, coordinator: str) -> str:

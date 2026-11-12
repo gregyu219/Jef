@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ agent.name }} · {{ project.name }} · Jef{% endblock %}
+{% block head %}{% if working %}<meta http-equiv="refresh" content="5">{% endif %}{% endblock %}
+{% block content %}
+  <section>
+    <h2>{{ agent.name }}</h2>
+    <p class="hint">{{ agent.role.value }} in <a href="/projects/{{ project.slug }}">{{ project.name }}</a> · spawned by {{ agent.parent or "you" }} · <span class="pill {{ agent.status.value | lower }}">{{ agent.status.value }}</span>{% if agent.note %} · {{ agent.note }}{% endif %}</p>
+    {% if chat %}
+    <ol class="chat">
+      {% for line in chat %}<li class="{{ line.kind }}">{{ line.text }}</li>{% endfor %}
+    </ol>
+    {% else %}
+    <p class="empty">No messages yet.</p>
+    {% endif %}
+  </section>
+{% endblock %}

@@ -4,7 +4,7 @@
 
 You tell Jef what you want built. Jef keeps a backlog, and when you say go, it hands the work to a team of AI agents. Each piece of work comes back as a pull request on GitHub, and you decide what gets merged.
 
-> Status: early development. Jef is building itself first. You can add backlog items, start a project and chat with its coordinator. Research, task planning and implementers come next.
+> Status: early development. Jef is building itself first. The whole loop works: backlog → coordinator → research → tasks → implementers → PRs you merge.
 
 ## Running Jef
 
@@ -78,7 +78,24 @@ Every task in a project's status table is in one of five states:
 
 ### Heartbeats
 
-Each project coordinator wakes up on a heartbeat, every hour by default. You can change the interval for each project in the coordinator UI. On every beat, the coordinator starts agents for new tasks, nudges working agents toward their next hand-off, checks for merged PRs and updates the status table.
+Jef's heartbeat runs in the background while Jef is running. Every few seconds it acts on replies agents have finished: it saves research, records the task list, and notes PRs and stuck agents. It also starts the next task's implementer when it's that task's turn.
+
+Once per heartbeat interval (an hour by default; change it on the project page), it nudges implementers that are still working. It checks GitHub for merged PRs every five minutes.
+
+Tasks are built **one at a time** by default, because they usually build on each other. The next task starts after you merge the last one's PR. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
+
+### How agents hand work back
+
+Agents only reply in text, and Jef reads a few plain markers in those replies:
+
+| Who | Marker | What Jef does |
+| --- | --- | --- |
+| Coordinator | `ACTION: start-research` on its own line, after you say go | Starts the research agent |
+| Research agent | Its whole final reply | Saves it as `research.md`, then asks the coordinator for tasks |
+| Coordinator | A fenced `tasks` block with a numbered list | Writes `tasks.md` for you to approve (a new block replaces it, until you approve) |
+| Implementer | `STATUS: working`, `STATUS: pr-opened <url>` or `STATUS: stuck <reason>` | Updates the task and the agent's note |
+
+The skills in `skills/` tell each agent how to write these.
 
 ### Agents are chats
 
@@ -109,6 +126,8 @@ Everything lives in plain markdown in Jef's workspace, outside your code repos:
       agents.md           every agent: role, who spawned it, status, session
       chats/<agent>.jsonl each agent's full conversation
       research/           extra research for single tasks (rare)
+      repo/               the coordinator's clone of the project's repo
+      work/impl-<n>/      each implementer's own checkout
 ```
 
 ## Ground rules

@@ -5,6 +5,35 @@
   <section>
     <h2>{{ project.name }}</h2>
     <p class="hint">Repo <a href="https://github.com/{{ project.repo }}">{{ project.repo }}</a> · Coordinator <strong>{{ project.coordinator }}</strong>{% if coordinator %} · <span class="pill {{ coordinator.status.value | lower }}">{{ coordinator.status.value }}</span>{% endif %}</p>
+    {% if phase %}
+    <ol class="phases">
+      {% for ph in [phases.UNDERSTANDING, phases.RESEARCH, phases.PLANNING, phases.APPROVAL, phases.BUILDING, phases.DONE] %}
+      <li class="{{ 'current' if ph == phase else '' }}">{{ ph.value }}</li>
+      {% endfor %}
+    </ol>
+    {% if phase == phases.STOPPED %}<p class="empty">This project has been stopped.</p>{% endif %}
+    {% if problem %}
+    <div class="banner">{{ problem }}
+      <form method="post" action="/projects/{{ project.slug }}/retry"><button type="submit">Try again</button></form>
+    </div>
+    {% endif %}
+    {% if phase == phases.UNDERSTANDING %}
+    <p class="next">Next: when you're happy {{ project.coordinator }} understands, tell {{ project.coordinator }} "go", or press the button. A research agent will study the repo.</p>
+    <form method="post" action="/projects/{{ project.slug }}/research"><button type="submit">Start research</button></form>
+    {% elif phase == phases.RESEARCH %}
+    <p class="next">The research agent is studying the repo. Its findings become research.md.</p>
+    {% elif phase == phases.PLANNING %}
+    <p class="next">{{ project.coordinator }} is turning the research into tasks.</p>
+    {% elif phase == phases.APPROVAL %}
+    <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them. Each task becomes one PR, {{ at_once }} at a time: the next starts after you merge the last.</p>
+    <form method="post" action="/projects/{{ project.slug }}/approve"><button type="submit">Approve tasks and start building</button></form>
+    {% elif phase == phases.BUILDING %}
+    <p class="next">Implementers are building. Review and merge each PR on GitHub; Jef notices merges within five minutes and starts the next task.</p>
+    {% elif phase == phases.DONE %}
+    <p class="next">Every task is merged. This project is done.</p>
+    {% endif %}
+    {% endif %}
+    {% if error and error not in ["empty", "busy", "stopped", "claude"] %}<p class="error">{{ error }}</p>{% endif %}
   </section>
 
   <section>
@@ -40,10 +69,10 @@
     <h2>Agents</h2>
     {% if agents %}
     <table>
-      <thead><tr><th>Name</th><th>Role</th><th>Spawned by</th><th>Status</th></tr></thead>
+      <thead><tr><th>Name</th><th>Role</th><th>Spawned by</th><th>Status</th><th>Latest</th></tr></thead>
       <tbody>
       {% for a in agents %}
-        <tr><td>{{ a.name }}</td><td>{{ a.role.value }}</td><td>{{ a.parent or "you" }}</td><td>{{ a.status.value }}</td></tr>
+        <tr><td><a href="/projects/{{ project.slug }}/agents/{{ a.name }}">{{ a.name }}</a></td><td>{{ a.role.value }}</td><td>{{ a.parent or "you" }}</td><td>{{ a.status.value }}</td><td>{{ a.note }}</td></tr>
       {% endfor %}
       </tbody>
     </table>
@@ -57,10 +86,28 @@
     {% if tasks %}
     <table>
       <thead><tr><th>#</th><th>Task</th><th>Status</th><th>Agent</th><th>PR</th></tr></thead>
-      <tbody>{% for t in tasks %}<tr><td class="num">{{ t.number }}</td><td>{{ t.title }}</td><td>{{ t.status.value }}</td><td>{{ t.agent }}</td><td>{{ t.pr }}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for t in tasks %}<tr><td class="num">{{ t.number }}</td><td>{{ t.title }}</td><td>{{ t.status.value }}</td><td>{{ t.agent }}</td><td>{% if t.pr.startswith("https://") %}<a href="{{ t.pr }}">#{{ t.pr.rsplit("/", 1)[1] }}</a>{% else %}{{ t.pr }}{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
     {% else %}
-    <p class="empty">No tasks yet. The research agent and task planning come next.</p>
+    <p class="empty">No tasks yet. {{ project.coordinator }} proposes them after research.</p>
     {% endif %}
+  </section>
+
+  {% if research %}
+  <section>
+    <details>
+      <summary><h2>Research</h2></summary>
+      <pre class="doc">{{ research }}</pre>
+    </details>
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>Heartbeat</h2>
+    <p class="hint">How often Jef checks in on implementers that are still working.</p>
+    <form method="post" action="/projects/{{ project.slug }}/heartbeat">
+      <label>Every <input type="number" name="minutes" value="{{ heartbeat }}" min="5" max="1440" class="minutes"> minutes</label>
+      <button type="submit" class="secondary">Save</button>
+    </form>
   </section>
 {% endblock %}
