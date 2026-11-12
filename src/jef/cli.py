@@ -83,35 +83,34 @@ def cmd_run(args: argparse.Namespace) -> int:
         status = check_claude()
 
     from jef.pipeline import Heartbeat, Pipeline
+    from jef.runtime import Runtime
     from jef.workspace import Workspace
 
     from jef.ssh import keep_ssh_alive
 
-    ws = Workspace.default()
     keep_ssh_alive()  # a fetch on a dead connection gives up instead of hanging Jef
-    heartbeats: list[Heartbeat] = []
+    # One runtime for the web app and Jef's background threads, so they all
+    # see the same chats and pipeline.
+    runtime = Runtime(Workspace.default(), claude_status=status)
 
     def start_heartbeat(pipeline: Pipeline) -> None:
         """Called once agents can run: now, or when Check again first works."""
         heartbeat = Heartbeat(pipeline, background=True)
         heartbeat.tick_all()  # pick up anything that finished while Jef was off
         heartbeat.start()
-        heartbeats.append(heartbeat)
+        runtime.keep(heartbeat)
 
+    runtime.on_agents_ready(start_heartbeat)
     url = url_for(args.port)
     print(f"Jef is running at {url}  (press Ctrl+C to stop)")
     if not args.no_browser:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-    app = create_app(ws, claude_status=status, on_agents_ready=start_heartbeat)
+    app = create_app(runtime=runtime)
     try:
-        app.state.get_pipeline()  # starts the heartbeat now if Claude Code works
+        runtime.get_pipeline()  # starts the heartbeat now if Claude Code works
         uvicorn.run(app, host=HOST, port=args.port, log_level="warning")
     finally:
-        for heartbeat in heartbeats:
-            heartbeat.stop()
-        for runner in (app.state.chats, app.state.jef_chats):
-            if runner is not None:
-                runner.stop_running_turns()
+        runtime.stop()
     return 0
 
 

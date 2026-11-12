@@ -442,9 +442,9 @@ def test_agents_start_once_check_again_works(ws):
         on_agents_ready=ready.append,
     )
     c = TestClient(app)
-    assert app.state.get_pipeline() is None and ready == []
+    assert app.state.runtime.get_pipeline() is None and ready == []
     c.post("/settings/claude-check")
-    assert len(ready) == 1 and ready[0] is app.state.pipeline  # Jef's timer starts now
+    assert len(ready) == 1 and ready[0] is app.state.runtime.pipeline  # Jef's timer starts now
     c.post("/settings/claude-check")
     assert len(ready) == 1  # only once
     assert "Claude Code isn't working" not in c.get("/").text

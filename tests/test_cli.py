@@ -143,8 +143,8 @@ def test_run_still_starts_if_claude_code_is_not_signed_in(monkeypatch, capsys):
     seen = {}
 
     def fake_run(app, **kwargs):
-        seen["claude"] = app.state.claude
-        seen["pipeline"] = app.state.pipeline
+        seen["claude"] = app.state.runtime.claude
+        seen["pipeline"] = app.state.runtime.pipeline
 
     monkeypatch.setattr("uvicorn.run", fake_run)
     assert cli.main(["run", "--no-browser"]) == 0
