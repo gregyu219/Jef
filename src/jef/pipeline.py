@@ -191,6 +191,7 @@ class Pipeline:
     now: Callable[[], float] = time.time
     _last_beat: dict[str, float] = field(default_factory=dict)
     _last_pr_check: dict[str, float] = field(default_factory=dict)
+    _last_checked: dict[str, float] = field(default_factory=dict)
 
     # -- reading project state
 
@@ -287,6 +288,28 @@ class Pipeline:
                     self._last_beat[slug] = now
                     self._nudge(slug)
                 self._build(slug)
+
+    def check_now(self, slug: str) -> None:
+        """The "Check status now" button: the heartbeat's checks, straight away.
+
+        Reads finished replies, asks GitHub about every PR waiting for review and
+        starts the next task, but doesn't nudge implementers early, so it costs
+        no tokens.
+        """
+        with self.chats.lock:
+            if load_project(self.workspace, slug) is None:
+                raise PipelineError("There's no such project.")
+            if self.phase(slug) in (Phase.DONE, Phase.STOPPED):
+                raise PipelineError("This project is finished, so there's nothing to check.")
+            # Make tick check PRs after it has read replies, so a PR opened by a
+            # reply it reads now is checked too. _last_beat is left alone.
+            self._last_pr_check[slug] = float("-inf")
+            self.tick(slug)
+            self._last_checked[slug] = self.now()
+
+    def last_checked(self, slug: str) -> float | None:
+        """When you last pressed "Check status now", if Jef has run since."""
+        return self._last_checked.get(slug)
 
     def _on_reply(self, slug: str, agent: Agent, reply: Reply) -> None:
         if reply.is_error:

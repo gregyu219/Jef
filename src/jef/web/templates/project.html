@@ -28,9 +28,15 @@
     <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them. Each task becomes one PR, {{ at_once }} at a time: the next starts after you merge the last.</p>
     <form method="post" action="/projects/{{ project.slug }}/approve"><button type="submit">Approve tasks and start building</button></form>
     {% elif phase == phases.BUILDING %}
-    <p class="next">Implementers are building. Review and merge each PR on GitHub; Jef notices merges within five minutes and starts the next task.</p>
+    <p class="next">Implementers are building. Review and merge each PR on GitHub; Jef notices merges within five minutes and starts the next task, or press Check status now.</p>
     {% elif phase == phases.DONE %}
     <p class="next">Every task is merged. This project is done.</p>
+    {% endif %}
+    {% if phase not in [phases.DONE, phases.STOPPED] %}
+    <form method="post" action="/projects/{{ project.slug }}/check" class="check">
+      <button type="submit" class="secondary">Check status now</button>
+      <span class="hint">Reads agents' replies and asks GitHub about PRs straight away. Doesn't nudge agents, so it costs no tokens.{% if last_checked %} Last checked {{ last_checked }}.{% endif %}</span>
+    </form>
     {% endif %}
     {% endif %}
     {% if error and error not in ["empty", "busy", "stopped", "claude"] %}<p class="error">{{ error }}</p>{% endif %}

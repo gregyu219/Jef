@@ -56,6 +56,17 @@ def summarize_projects(ws: Workspace) -> list[ProjectSummary]:
     return summaries
 
 
+def ago(seconds: float) -> str:
+    """How long ago, in words: "just now", "5 minutes ago", "2 hours ago"."""
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} minute{'' if minutes == 1 else 's'} ago"
+    hours = minutes // 60
+    return f"{hours} hour{'' if hours == 1 else 's'} ago"
+
+
 def create_app(
     workspace: Workspace | None = None,
     github_check: Callable[[], GitHubStatus] = github_status,
@@ -187,6 +198,7 @@ def create_app(
         agents = runner.refresh(slug) if runner else []
         coordinator = next((a for a in agents if a.name == project.coordinator_agent), None)
         usage = project_usage(ws, slug)
+        checked = flow.last_checked(slug) if flow else None
         return TEMPLATES.TemplateResponse(
             request,
             "project.html",
@@ -204,6 +216,7 @@ def create_app(
                 "problem": flow.problem(slug) if flow else "",
                 "research": flow.research(slug) if flow else "",
                 "heartbeat": flow.heartbeat_minutes(slug) if flow else 60,
+                "last_checked": ago(flow.now() - checked) if checked is not None else "",
                 "at_once": IMPLEMENTERS_AT_ONCE,
                 "usage": usage,
                 "usage_total": sum(usage.values(), Usage()),
@@ -237,6 +250,10 @@ def create_app(
     @app.post("/projects/{slug}/retry")
     def retry(slug: str):
         return pipeline_action(slug, lambda flow: flow.clear_problem(slug))
+
+    @app.post("/projects/{slug}/check")
+    def check_now(slug: str):
+        return pipeline_action(slug, lambda flow: flow.check_now(slug))
 
     @app.post("/projects/{slug}/heartbeat")
     def set_heartbeat(slug: str, minutes: str = Form("")):
