@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from jef.backlog import Backlog, BacklogStatus
-from jef.chats import Chats, Role, Status, load_roster
+from jef.chats import Chats, ChatError, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus
 from jef.pipeline import Heartbeat, Phase, Pipeline, PipelineError, parse_pr, parse_status, parse_tasks
@@ -12,6 +12,7 @@ from jef.publish import PublishError
 from jef.projects import goal_fields, slugify, start_project
 from jef.status import read_status, status_path
 from jef.tasks import TaskStatus
+from jef.usage import budget_left
 from jef.web.app import ago, create_app
 from jef.workspace import Workspace
 
@@ -82,7 +83,7 @@ class World:
         self.pr_states = {}
         self.mergeable = {}
         self.clock = 1_000_000.0
-        self.chats = Chats(self.ws, "/bin/claude", popen=self.popen)
+        self.chats = Chats(self.ws, "/bin/claude", popen=self.popen, budget_left=lambda slug: budget_left(self.ws, slug))
         self.git = FakeGit()
         self.publisher = FakePublisher()
         self.pipeline = Pipeline(self.ws, self.chats, git=self.git, publisher=self.publisher, pr_state=lambda url: self.pr_states.get(url, "OPEN"),
@@ -96,11 +97,14 @@ class World:
         self.procs.setdefault(name, []).append(proc)
         return proc
 
-    def reply(self, name, text, is_error=False):
+    def reply(self, name, text, is_error=False, cost=0.0, subtype=""):
         """The agent's current turn ends with this reply."""
+        result = {"type": "result", "is_error": is_error, "result": text, "total_cost_usd": cost}
+        if subtype:
+            result["subtype"] = subtype
         with self.chats.chat_file(self.slug, name).open("a") as f:
             f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}) + "\n")
-            f.write(json.dumps({"type": "result", "is_error": is_error, "result": text}) + "\n")
+            f.write(json.dumps(result) + "\n")
         self.procs[name][-1].done = True
         self.pipeline.tick(self.slug)
 
@@ -292,6 +296,60 @@ def test_heartbeat_interval_is_per_project(w):
         w.pipeline.set_heartbeat_minutes(w.slug, 1)
 
 
+def flag(cmd, name):
+    return cmd[cmd.index(name) + 1] if name in cmd else None
+
+
+def test_a_spent_budget_pauses_the_project_until_you_raise_it(w):
+    p, slug = w.pipeline, w.slug
+    assert p.budget_usd(slug) is None
+    assert flag(w.procs["ada"][0].cmd, "--max-budget-usd") is None  # no budget, no cap
+    p.set_budget_usd(slug, 1)
+    assert goal_fields(w.ws, slug)["budget"] == "1.00 USD"
+    p.start_research(slug)
+    assert flag(w.procs["research"][0].cmd, "--max-budget-usd") == "1.00"
+    w.reply("ada", "hi", cost=0.4)
+    w.reply("research", "findings", cost=0.7)  # $1.10 of $1.00
+
+    # Paused: the reply waits, no planning turn starts, and you can't message Ada.
+    assert p.problem(slug).startswith("Budget reached: $1.10 of $1.00 used")
+    assert not (w.ws.project_dir(slug) / "research.md").exists()
+    ada_turns = len(w.procs["ada"])
+    w.clock += 3 * 3600
+    p.tick(slug)
+    assert len(w.procs["ada"]) == ada_turns
+    with pytest.raises(ChatError, match="budget is used up"):
+        w.chats.send(slug, "ada", "hello?")
+    p.clear_problem(slug)  # Try again doesn't help while it's still spent
+    assert p.problem(slug).startswith("Budget reached")
+
+    # Raising the budget lifts the pause; the next turn is capped at what's left.
+    p.set_budget_usd(slug, 5)
+    assert p.problem(slug) == ""
+    p.tick(slug)
+    assert (w.ws.project_dir(slug) / "research.md").exists()
+    assert len(w.procs["ada"]) == ada_turns + 1
+    assert flag(w.procs["ada"][-1].cmd, "--max-budget-usd") == "3.90"
+
+    p.set_budget_usd(slug, None)
+    assert goal_fields(w.ws, slug)["budget"] == "none" and p.budget_usd(slug) is None
+    for bad in (0, -3, float("nan"), float("inf")):
+        with pytest.raises(PipelineError):
+            p.set_budget_usd(slug, bad)
+
+
+def test_a_turn_cut_off_by_the_budget_says_so(w):
+    approved_with_one_task(w)
+    w.pipeline.set_budget_usd(w.slug, 2)
+    w.reply("impl-1", "", is_error=True, cost=2.05, subtype="error_max_budget_usd")
+    assert w.pipeline.problem(w.slug).startswith("Budget reached")
+    # The reply is read once the budget is raised; it says why the turn stopped.
+    w.pipeline.set_budget_usd(w.slug, 10)
+    w.pipeline.tick(w.slug)
+    assert w.agent("impl-1").note == "Last turn stopped partway: it reached the project budget"
+    assert any("project's budget" in line.text for line in w.chats.transcript(w.slug, "impl-1"))
+
+
 def test_web_buttons(w):
     app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
                      chats=w.chats, pipeline=w.pipeline)
@@ -314,6 +372,27 @@ def test_web_buttons(w):
     c.post(f"/projects/{w.slug}/heartbeat", data={"minutes": "30"})
     assert w.pipeline.heartbeat_minutes(w.slug) == 30
     assert "between 5 minutes" in c.post(f"/projects/{w.slug}/heartbeat", data={"minutes": "2"}).text
+
+
+def test_web_budget_form(w):
+    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
+                     chats=w.chats, pipeline=w.pipeline)
+    c = TestClient(app)
+    assert "No budget" in c.get(f"/projects/{w.slug}").text
+    c.post(f"/projects/{w.slug}/budget", data={"amount": "$12.50"})
+    assert w.pipeline.budget_usd(w.slug) == 12.5
+    w.reply("ada", "hi", cost=2.5)
+    page = c.get(f"/projects/{w.slug}").text
+    assert "Budget $12.50 · $10.00 left" in page and 'value="12.50"' in page
+    assert "Type a dollar amount" in c.post(f"/projects/{w.slug}/budget", data={"amount": "lots"}).text
+    assert "above $0" in c.post(f"/projects/{w.slug}/budget", data={"amount": "0"}).text
+
+    # Spent: messages to the coordinator are refused, with a clear reason.
+    c.post(f"/projects/{w.slug}/budget", data={"amount": "2"})
+    page = c.post(f"/projects/{w.slug}/message", data={"message": "hello"}).text
+    assert "budget is used up" in page and "Budget reached" in page
+    c.post(f"/projects/{w.slug}/budget", data={"amount": ""})
+    assert w.pipeline.budget_usd(w.slug) is None
 
 
 def approved_with_one_task(w):

@@ -134,6 +134,16 @@ If something needs fixing, Jef tells the agent, up to three times, then marks it
 
 Every finished agent turn ends with a summary from Claude Code that includes the tokens it used and an estimated cost. Jef adds these up straight from the chat logs (no separate ledger) and shows them per agent and per project on the project page, the agent page and the home page. The costs are Claude Code's estimates at API list prices: if you sign in with a Claude subscription you aren't billed per token, so read them as "what this would cost on the API". A turn that's stopped before it finishes writes no summary, so its usage isn't counted.
 
+### Budgets
+
+Each project can have a dollar budget, set under Usage on its project page (it's saved as a `- Budget: 20.00 USD` line in `goal.md`). Projects have no budget unless you set one. With a budget:
+
+- Before starting any agent turn, Jef checks what's left. Once the estimated cost reaches the budget, the project pauses: no agent starts another turn, the heartbeat stops nudging, and messages to the coordinator are refused. A banner on the project page says so.
+- Each turn is also started with Claude Code's `--max-budget-usd` set to what's left, so one long turn gets stopped partway instead of running far past the budget. This needs a recent Claude Code (v2.1.217 or later).
+- Raise the budget (or clear it) and the project carries on by itself.
+
+Spending can still go a little over: a turn's cost is only known once it's finished, and Claude Code stops a turn a bit after it reaches its cap.
+
 You're responsible for using Claude Code within [Anthropic's terms](https://www.anthropic.com/legal) for the account you sign in with.
 
 ## Where Jef keeps things
@@ -165,6 +175,7 @@ Everything lives in plain markdown in Jef's workspace, outside your code repos:
 - **Jef never merges.** A human always has the final say.
 - **No agent pushes to `main`.** Every change arrives as a PR from its own branch.
 - **Nothing starts without you.** Jef asks before turning a backlog item into a project.
+- **Costs are estimates.** Usage and budgets use Claude Code's own cost estimates at API list prices.
 - **Skills are yours.** The coordinator and each agent type follow a skill you write, in markdown.
 
 ## Tech

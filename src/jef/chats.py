@@ -6,6 +6,8 @@ is a named Claude Code session with its own conversation:
 - **Spawn** starts a new session with a fixed session ID and a first message.
 - **Send** resumes that same session with another message, so the agent
   remembers everything so far. Heartbeats and "small fix" requests use this.
+- No turn starts once the project's dollar budget is used up, and each turn
+  is capped at what's left with Claude Code's ``--max-budget-usd``.
 - **Stop** ends an agent. Stopping an agent also stops every agent it spawned,
   so closing a coordinator closes its workers.
 
@@ -136,10 +138,14 @@ class ChatLine:
 class Reply:
     text: str
     is_error: bool = False
+    subtype: str = ""  # Claude Code's result subtype, like "error_max_budget_usd"
 
 
 class ChatError(RuntimeError):
     pass
+
+
+BUDGET_USED_UP = "This project's budget is used up. Raise the budget on the project page to keep going."
 
 
 def _roster_path(ws: Workspace, project: str) -> Path:
@@ -194,6 +200,9 @@ class Chats:
     claude_path: str
     popen: Callable[..., subprocess.Popen] = subprocess.Popen
     new_session_id: Callable[[], str] = lambda: str(uuid.uuid4())
+    # Dollars left in a project's budget, or None for no budget. Passed in
+    # (see ``usage.budget_left``) so this module doesn't import the projects code.
+    budget_left: Callable[[str], float | None] = lambda project: None
     _running: dict[tuple[str, str], subprocess.Popen] = field(default_factory=dict)
     # The web pages and the heartbeat both change agents.md; one at a time.
     lock: threading.RLock = field(default_factory=threading.RLock)
@@ -211,7 +220,16 @@ class Chats:
 
     # ---- commands
 
-    def command(self, agent: Agent, project: str, first_turn: bool, instructions: str = "") -> list[str]:
+    def _check_budget(self, project: str) -> float | None:
+        """Refuse to start a turn once the budget is used up. Returns what's left."""
+        left = self.budget_left(project)
+        if left is not None and left <= 0:
+            raise ChatError(BUDGET_USED_UP)
+        return left
+
+    def command(
+        self, agent: Agent, project: str, first_turn: bool, instructions: str = "", budget_left: float | None = None
+    ) -> list[str]:
         policy = POLICIES[agent.role]
         cmd = [self.claude_path, "-p", "--output-format", "stream-json", "--verbose"]
         if first_turn:
@@ -223,11 +241,24 @@ class Chats:
         cmd += ["--disallowedTools", *ALWAYS_DENIED]
         if policy.model:
             cmd += ["--model", policy.model]
+        if budget_left is not None:
+            # Claude Code stops this one run once it has spent what's left. It
+            # doesn't count earlier runs, which is why Jef passes the remainder.
+            cmd += ["--max-budget-usd", f"{max(budget_left, 0.01):.2f}"]
         if instructions:
             cmd += ["--append-system-prompt", instructions]
         return cmd
 
-    def _run_turn(self, project: str, agent: Agent, message: str, sender: str, first_turn: bool, instructions: str = "") -> None:
+    def _run_turn(
+        self,
+        project: str,
+        agent: Agent,
+        message: str,
+        sender: str,
+        first_turn: bool,
+        instructions: str = "",
+        budget_left: float | None = None,
+    ) -> None:
         log = self.chat_file(project, agent.name)
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as out:
@@ -237,7 +268,7 @@ class Chats:
         prompt_file.write_text(message, encoding="utf-8")
         with prompt_file.open("rb") as stdin, log.open("ab") as stdout, log.with_suffix(".err.log").open("ab") as stderr:
             proc = self.popen(
-                self.command(agent, project, first_turn, instructions),
+                self.command(agent, project, first_turn, instructions, budget_left),
                 cwd=agent.folder,
                 stdin=stdin,
                 stdout=stdout,
@@ -271,10 +302,13 @@ class Chats:
             raise ChatError(f"There's already an agent named {name!r} in this project.")
         if parent:
             self._find(agents, parent)
+        left = self._check_budget(project)
         agent = Agent(name, role, self.new_session_id(), str(Path(folder).resolve()), parent, Status.WORKING)
         agents.append(agent)
         save_roster(self.workspace, project, agents)
-        self._run_turn(project, agent, message, sender=parent or "you", first_turn=True, instructions=instructions)
+        self._run_turn(
+            project, agent, message, sender=parent or "you", first_turn=True, instructions=instructions, budget_left=left
+        )
         return agent
 
     def send(self, project: str, name: str, message: str, sender: str = "you", instructions: str = "") -> Agent:
@@ -289,9 +323,10 @@ class Chats:
             raise ChatError(f"{name} has been stopped.")
         if agent.status is Status.WORKING:
             raise ChatError(f"{name} is still working on its last message. Try again when it's done.")
+        left = self._check_budget(project)
         agent.status = Status.WORKING
         save_roster(self.workspace, project, agents)
-        self._run_turn(project, agent, message, sender, first_turn=False, instructions=instructions)
+        self._run_turn(project, agent, message, sender, first_turn=False, instructions=instructions, budget_left=left)
         return agent
 
     def refresh(self, project: str) -> list[Agent]:
@@ -369,7 +404,9 @@ class Chats:
             except json.JSONDecodeError:
                 continue
             if event.get("type") == "result":
-                out.append(Reply(str(event.get("result") or ""), bool(event.get("is_error"))))
+                out.append(
+                    Reply(str(event.get("result") or ""), bool(event.get("is_error")), str(event.get("subtype") or ""))
+                )
         return out
 
     def transcript(self, project: str, name: str) -> list[ChatLine]:
@@ -402,6 +439,8 @@ def _describe(event: dict) -> list[ChatLine]:
         return out
     if kind == "result":
         if event.get("is_error"):
+            if "budget" in str(event.get("subtype") or ""):
+                return [ChatLine("error", "Stopped partway: this turn used up the rest of the project's budget.")]
             return [ChatLine("error", str(event.get("result") or event.get("subtype") or "The turn failed."))]
         return [ChatLine("result", "Turn finished.")]
     return []

@@ -71,6 +71,43 @@ def test_send_resumes_the_same_conversation_after_the_turn_ends(setup):
     assert [l.text for l in sent] == ["you: Build task 1", "coordinator: Please also add a test"]
 
 
+def test_turns_are_capped_at_what_is_left_of_the_budget(setup):
+    ws, repo, chats, procs = setup
+    chats.spawn("todo", "free", Role.IMPLEMENTER, "No budget", repo)
+    assert "--max-budget-usd" not in procs[0].cmd
+    left = {"todo": 2.5}
+    chats.budget_left = lambda project: left[project]
+    chats.spawn("todo", "impl-1", Role.IMPLEMENTER, "Build it", repo)
+    cmd = procs[1].cmd
+    assert cmd[cmd.index("--max-budget-usd") + 1] == "2.50"
+    procs[1].done = True
+    left["todo"] = 0.004  # a sliver left still runs, capped at a cent
+    chats.send("todo", "impl-1", "more")
+    assert procs[2].cmd[procs[2].cmd.index("--max-budget-usd") + 1] == "0.01"
+
+
+def test_no_turn_starts_once_the_budget_is_used_up(setup):
+    ws, repo, chats, procs = setup
+    chats.spawn("todo", "impl-1", Role.IMPLEMENTER, "Build it", repo)
+    procs[0].done = True
+    chats.budget_left = lambda project: -0.2
+    with pytest.raises(ChatError, match="budget is used up"):
+        chats.send("todo", "impl-1", "more")
+    with pytest.raises(ChatError, match="budget is used up"):
+        chats.spawn("todo", "impl-2", Role.IMPLEMENTER, "Build it", repo)
+    assert len(procs) == 1
+    assert [(a.name, a.status) for a in load_roster(ws, "todo")] == [("impl-1", Status.IDLE)]
+
+
+def test_replies_keep_the_result_subtype(setup):
+    ws, repo, chats, procs = setup
+    chats.spawn("todo", "impl-1", Role.IMPLEMENTER, "Build it", repo)
+    with chats.chat_file("todo", "impl-1").open("a") as f:
+        f.write(json.dumps({"type": "result", "is_error": True, "subtype": "error_max_budget_usd"}) + "\n")
+    assert chats.replies("todo", "impl-1")[0].subtype == "error_max_budget_usd"
+    assert chats.transcript("todo", "impl-1")[-1].text.startswith("Stopped partway")
+
+
 def test_stopping_a_coordinator_stops_its_workers(setup):
     ws, repo, chats, procs = setup
     chats.spawn("todo", "ada", Role.COORDINATOR, "Plan it", repo)
