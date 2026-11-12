@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from jef.chats import ALWAYS_DENIED, Chats, ChatError, Role, Status, load_roster
+from jef.chats import ALWAYS_DENIED, Agent, Chats, ChatError, Role, Status, load_roster
 from jef.workspace import Workspace
 
 
@@ -54,6 +54,22 @@ def test_spawn_starts_a_named_session_and_records_it(setup):
     assert procs[0].kwargs["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
     roster = load_roster(ws, "todo")
     assert [(a.name, a.role, a.status) for a in roster] == [("impl-1", Role.IMPLEMENTER, Status.WORKING)]
+
+
+def test_only_coordinators_get_the_one_hour_cache(setup, monkeypatch):
+    ws, repo, chats, procs = setup
+    monkeypatch.delenv("CLAUDE_CODE_PROMPT_CACHE_TTL", raising=False)
+    env = lambda role: chats.agent_env("todo", Agent("x", role, "s", str(repo)))  # noqa: E731
+    assert env(Role.COORDINATOR)["CLAUDE_CODE_PROMPT_CACHE_TTL"] == "1h"
+    for role in (Role.RESEARCH, Role.IMPLEMENTER, Role.JEF):
+        assert "CLAUDE_CODE_PROMPT_CACHE_TTL" not in env(role)
+
+
+def test_a_cache_ttl_you_set_yourself_is_kept(setup, monkeypatch):
+    ws, repo, chats, procs = setup
+    monkeypatch.setenv("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m")
+    env = chats.agent_env("todo", Agent("x", Role.COORDINATOR, "s", str(repo)))
+    assert env["CLAUDE_CODE_PROMPT_CACHE_TTL"] == "5m"
 
 
 def test_send_resumes_the_same_conversation_after_the_turn_ends(setup):

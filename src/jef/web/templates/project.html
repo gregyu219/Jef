@@ -82,11 +82,11 @@
     <h2>Agents</h2>
     {% if agents %}
     <table>
-      <thead><tr><th>Name</th><th>Role</th><th>Spawned by</th><th>Status</th><th>Tokens</th><th>Est. cost</th><th>Latest</th></tr></thead>
+      <thead><tr><th>Name</th><th>Role</th><th>Spawned by</th><th>Status</th><th>Model</th><th>Tokens</th><th>Cache hits</th><th>Est. cost</th><th>Latest</th></tr></thead>
       <tbody>
       {% for a in agents %}
         {% set used = usage.get(a.name, no_usage) %}
-        <tr><td><a href="/projects/{{ project.slug }}/agents/{{ a.name }}">{{ a.name }}</a></td><td>{{ a.role.value }}</td><td>{{ a.parent or "you" }}</td><td>{{ a.status.value }}</td><td class="num">{{ used.total_tokens | tokens }}</td><td class="num">{{ used.cost_usd | cost }}</td><td>{{ a.note }}</td></tr>
+        <tr><td><a href="/projects/{{ project.slug }}/agents/{{ a.name }}">{{ a.name }}</a></td><td>{{ a.role.value }}</td><td>{{ a.parent or "you" }}</td><td>{{ a.status.value }}</td><td>{{ used.models | join(", ") or "–" }}</td><td class="num">{{ used.total_tokens | tokens }}</td><td class="num">{{ used.cache_hit_rate | rate }}</td><td class="num">{{ used.cost_usd | cost }}</td><td>{{ a.note }}</td></tr>
       {% endfor %}
       </tbody>
     </table>
@@ -100,7 +100,9 @@
     <p class="hint">Added up from every finished agent turn. Costs are Claude Code's estimates at API list prices, not necessarily what you're billed (for example on a Claude subscription).</p>
     <p class="usage">{{ usage_total.total_tokens | tokens }} tokens · {{ usage_total.cost_usd | cost }} estimated · {{ usage_total.turns }} turn{{ "" if usage_total.turns == 1 else "s" }}</p>
     {% if usage_total.turns %}
-    <p class="hint">{{ usage_total.input_tokens | tokens }} input, {{ usage_total.output_tokens | tokens }} output, {{ usage_total.cache_read_tokens | tokens }} cache reads, {{ usage_total.cache_write_tokens | tokens }} cache writes.</p>
+    <p class="hint">{{ usage_total.input_tokens | tokens }} input, {{ usage_total.output_tokens | tokens }} output, {{ usage_total.cache_read_tokens | tokens }} cache reads, {{ usage_total.cache_write_tokens | tokens }} cache writes ({{ usage_total.cache_write_1h_tokens | tokens }} kept for an hour).</p>
+    <p class="usage">Cache hit rate {{ usage_total.cache_hit_rate | rate }} · {{ (usage_total.cost_usd / usage_total.turns) | cost }} per turn</p>
+    <p class="hint">The share of what agents sent that was read back from Claude Code's prompt cache, at about a tenth of the normal price. Coordinators keep their cache for an hour, so it lasts from one heartbeat to the next.</p>
     {% endif %}
     {% if budget %}
     <p class="usage">Budget {{ budget | cost }} · {{ [budget - usage_total.cost_usd, 0] | max | cost }} left</p>

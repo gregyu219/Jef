@@ -13,6 +13,7 @@ from jef.usage import (
     budget_left,
     budget_usd,
     format_cost,
+    format_rate,
     latest_plan_usage,
     parse_budget,
     plan_windows,
@@ -46,8 +47,50 @@ def write_log(path, *events):
 
 def test_usage_from_a_result_event():
     used = usage_from_event(RESULT)
-    assert used == Usage(12, 3400, 150000, 21000, 0.2268, 1)
+    assert used == Usage(12, 3400, 150000, 21000, 0.2268, 1, models=("claude-opus-5-5",))
     assert used.total_tokens == 174412
+    assert used.prompt_tokens == 171012
+    assert abs(used.cache_hit_rate - 150000 / 171012) < 1e-9
+
+
+def test_one_hour_cache_writes_are_counted():
+    event = {**RESULT, "usage": {**RESULT["usage"], "cache_creation": {"ephemeral_5m_input_tokens": 1000, "ephemeral_1h_input_tokens": 20000}}}
+    assert usage_from_event(event).cache_write_1h_tokens == 20000
+    odd = {**RESULT, "usage": {**RESULT["usage"], "cache_creation": "nope"}}
+    assert usage_from_event(odd).cache_write_1h_tokens == 0
+
+
+def test_cache_hit_rate_with_nothing_sent():
+    assert Usage().cache_hit_rate is None
+    assert Usage(input_tokens=0, output_tokens=50).cache_hit_rate is None
+    assert format_rate(None) == "–"
+    assert format_rate(0.8771) == "88%"
+    assert format_rate(0.0) == "0%"
+
+
+def test_models_come_from_model_usage_in_the_order_first_used(tmp_path):
+    log = tmp_path / "ada.jsonl"
+    write_log(
+        log,
+        {"type": "system", "subtype": "init", "model": "claude-haiku-5-5"},
+        RESULT,
+        {**RESULT, "modelUsage": {"claude-sonnet-5-5": {}, "claude-opus-5-5": {}}},
+        {**RESULT, "modelUsage": "odd"},
+    )
+    used = agent_usage(log)
+    assert used.models == ("claude-opus-5-5", "claude-sonnet-5-5")
+    assert used.cache_write_1h_tokens == 0
+
+
+def test_models_fall_back_to_the_init_event(tmp_path):
+    log = tmp_path / "ada.jsonl"
+    no_breakdown = {k: v for k, v in RESULT.items() if k != "modelUsage"}
+    write_log(log, {"type": "system", "subtype": "init", "model": "claude-sonnet-5-5"}, no_breakdown)
+    assert agent_usage(log).models == ("claude-sonnet-5-5",)
+    # A turn still running has no result yet, but its init says the model.
+    write_log(log, {"type": "system", "subtype": "init", "model": "claude-haiku-5-5"})
+    used = agent_usage(log)
+    assert used.models == ("claude-haiku-5-5",) and used.turns == 0
 
 
 def test_missing_or_odd_values_count_as_zero():
@@ -242,6 +285,10 @@ def test_pages_show_usage(tmp_path):
     assert "Est. cost" in page
     assert "348.8k tokens · $0.45 estimated · 2 turns" in page
     assert ">$0.00<" in page  # impl-1 hasn't finished a turn yet
+    assert "<th>Model</th>" in page and "<td>claude-opus-5-5</td>" in page
+    assert '<td class="num">88%</td>' in page  # ada's cache hits
+    assert '<td class="num">–</td>' in page  # impl-1 hasn't sent anything
+    assert "Cache hit rate 88% · $0.23 per turn" in page
     agent = client.get("/projects/demo/agents/ada").text
-    assert "348.8k tokens · $0.45 estimated · 2 turns" in agent
+    assert "348.8k tokens · $0.45 estimated · 2 turns · cache hit rate 88% · claude-opus-5-5" in agent
     assert "$0.45" in client.get("/").text

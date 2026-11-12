@@ -173,6 +173,10 @@ Spending can still go a little over: a turn's cost is only known once it's finis
 
 Each level of a project runs on its own model: Sonnet for the coordinator, Opus for research and implementers. Change them under Models on the project page (they're saved as lines like `- Coordinator model: haiku` in `goal.md`). Pick `haiku`, `sonnet`, `opus`, `fable`, or `default` for Claude Code's own default. A change applies from each agent's next turn. That first turn on the new model re-reads its conversation without the prompt cache, so it costs a little more.
 
+### Prompt caching
+
+Claude Code caches the parts of a conversation that repeat from turn to turn (the skill, and files like `goal.md` and `research.md` the agent has already read), and cache reads cost about a tenth of normal input. With an API key the cache lasts only 5 minutes by default, and heartbeats are an hour apart, so Jef starts coordinator turns with `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` to keep it from one heartbeat to the next (Claude Code v2.1.242 or later; on a Claude subscription it's already an hour). If you've set that variable yourself, Jef leaves it alone. The project page shows each agent's model and cache hit rate, and the project's hit rate and cost per turn, so you can see what it saves.
+
 You're responsible for using Claude Code within [Anthropic's terms](https://www.anthropic.com/legal) for the account you sign in with.
 
 ## Where Jef keeps things

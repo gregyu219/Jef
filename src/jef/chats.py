@@ -42,6 +42,14 @@ HEADERS = ["Name", "Role", "Parent", "Status", "Handled", "Note", "Session", "Fo
 # Agents keep their notes in Jef's project files, not in your personal Claude
 # Code memory, so switch Claude Code's auto memory off for them.
 AGENT_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+# Coordinators wake about once an hour, but on an API key Claude Code keeps
+# its prompt cache for only 5 minutes, so every heartbeat would re-read the
+# whole conversation uncached. Ask for the one-hour cache instead (Claude Code
+# v2.1.242 or later; older versions ignore it). One-hour cache writes cost
+# more, but each heartbeat then reads the conversation at a tenth of the price.
+# A value you've set yourself is left alone.
+CACHE_TTL_VAR = "CLAUDE_CODE_PROMPT_CACHE_TTL"
+COORDINATOR_CACHE_TTL = "1h"
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 # Never allowed for any agent, whatever its role. Deny rules win over allow
@@ -141,8 +149,10 @@ POLICIES: dict[Role, RolePolicy] = {
     ),
 }
 
-# Each role's skill, sent with every turn: Claude Code doesn't keep
-# --append-system-prompt from one run of a session to the next.
+# Each role's skill, sent with every turn. Claude Code records the system
+# prompt on a conversation's first turn and reuses it on --resume, so this is
+# part of the cached prefix either way; sending it again is harmless and puts
+# it back after Claude Code compacts the conversation.
 SKILLS = {Role.COORDINATOR: "coordinator", Role.RESEARCH: "research", Role.IMPLEMENTER: "implementer", Role.JEF: "jef"}
 
 
@@ -309,6 +319,7 @@ class Chats:
             env["JEF_HOME"] = str(self.workspace.root)
             env["JEF_PROJECT"] = project
             env["JEF_AGENT"] = agent.name
+            env.setdefault(CACHE_TTL_VAR, COORDINATOR_CACHE_TTL)
             bin_dir = jef_bin_dir()
             if bin_dir:
                 env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
