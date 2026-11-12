@@ -118,7 +118,7 @@ class World:
         return next(a for a in load_roster(self.ws, self.slug) if a.name == name)
 
     def ask(self, command, sender="ada", **args):
-        """The coordinator runs `jef project <command>`; Jef carries it out."""
+        """The coordinator runs one of its jef commands; Jef carries it out."""
         request_id = inbox.submit(self.ws, self.slug, sender, command, args)
         self.pipeline.process_inbox(self.slug)
         return inbox.wait_for_answer(self.ws, self.slug, request_id, 0)
@@ -483,24 +483,24 @@ def test_heartbeat_interval_is_per_project(w):
 def test_coordinators_get_jef_commands_and_nobody_else_does(w):
     ada = w.procs["ada"][0]
     assert ada.kwargs["env"]["JEF_PROJECT"] == w.slug and ada.kwargs["env"]["JEF_AGENT"] == "ada"
-    assert "Bash(jef project *)" in ada.cmd
-    assert "jef project start" in flag(ada.cmd, "--append-system-prompt")
+    assert "Bash(jef task *)" in ada.cmd and "Bash(jef stop)" not in ada.cmd
+    assert "jef task start" in flag(ada.cmd, "--append-system-prompt")
     building(w)
     impl = w.procs["impl-1"][0]
     assert "JEF_PROJECT" not in impl.kwargs["env"] and "JEF_AGENT" not in impl.kwargs["env"]
-    assert "Bash(jef project *)" not in impl.cmd and "Bash(jef *)" in impl.cmd[impl.cmd.index("--disallowedTools"):]
+    assert "Bash(jef task *)" not in impl.cmd and "Bash(jef *)" in impl.cmd[impl.cmd.index("--disallowedTools"):]
     # Every turn carries the role's instructions, not just the first.
-    assert "jef project start" in flag(w.procs["ada"][-1].cmd, "--append-system-prompt")
+    assert "jef task start" in flag(w.procs["ada"][-1].cmd, "--append-system-prompt")
     assert "--resume" in w.procs["ada"][-1].cmd
 
 
-# ---- jef project, the command coordinators run
+# ---- the jef commands coordinators run
 
 
 def parse(*argv):
     from jef.cli import build_parser
 
-    return build_parser().parse_args(["project", *argv])
+    return build_parser().parse_args(list(argv))
 
 
 def coordinator_env(w):
@@ -508,19 +508,19 @@ def coordinator_env(w):
 
 
 def test_jef_project_only_works_in_a_coordinators_turn(w, capsys):
-    assert coordinate.run(parse("status"), ws=w.ws, env={}) == 2
-    assert coordinate.run(parse("status"), ws=w.ws, env={"JEF_PROJECT": w.slug, "JEF_AGENT": "impl-1"}) == 2
+    assert coordinate.run(parse("overview"), ws=w.ws, env={}) == 2
+    assert coordinate.run(parse("overview"), ws=w.ws, env={"JEF_PROJECT": w.slug, "JEF_AGENT": "impl-1"}) == 2
     assert "only works inside a coordinator's turn" in capsys.readouterr().out
 
 
 def test_jef_project_reads_without_jef_running(w, capsys):
-    assert coordinate.run(parse("status"), ws=w.ws, env=coordinator_env(w)) == 0
+    assert coordinate.run(parse("overview"), ws=w.ws, env=coordinator_env(w)) == 0
     assert "- Phase: Understanding" in capsys.readouterr().out
-    assert coordinate.run(parse("read", "ada"), ws=w.ws, env=coordinator_env(w)) == 0
+    assert coordinate.run(parse("agent", "read", "ada"), ws=w.ws, env=coordinator_env(w)) == 0
     assert "still working on its first turn" in capsys.readouterr().out
-    assert coordinate.run(parse("read", "nobody"), ws=w.ws, env=coordinator_env(w)) == 1
+    assert coordinate.run(parse("agent", "read", "nobody"), ws=w.ws, env=coordinator_env(w)) == 1
     # Changing things needs the running Jef.
-    assert coordinate.run(parse("research"), ws=w.ws, env=coordinator_env(w)) == 1
+    assert coordinate.run(parse("research", "start"), ws=w.ws, env=coordinator_env(w)) == 1
     assert "Jef isn't running" in capsys.readouterr().out
 
 
@@ -537,10 +537,10 @@ def test_jef_project_round_trip_through_the_running_jef(w, capsys):
     thread = threading.Thread(target=jef)
     thread.start()
     try:
-        code = coordinate.run(parse("research", "look", "at", "base.html"), ws=w.ws, env=coordinator_env(w), wait_seconds=5)
+        code = coordinate.run(parse("research", "start", "look", "at", "base.html"), ws=w.ws, env=coordinator_env(w), wait_seconds=5)
         assert code == 0 and "research agent has started" in capsys.readouterr().out
         assert "look at base.html" in w.last_message("research")
-        code = coordinate.run(parse("send", "impl-9", "hello"), ws=w.ws, env=coordinator_env(w), wait_seconds=5)
+        code = coordinate.run(parse("agent", "send", "impl-9", "hello"), ws=w.ws, env=coordinator_env(w), wait_seconds=5)
         assert code == 1 and "isn't one of your agents" in capsys.readouterr().out
     finally:
         stop.set()
@@ -548,11 +548,23 @@ def test_jef_project_round_trip_through_the_running_jef(w, capsys):
 
 
 def test_request_args():
-    assert coordinate.request_args(parse("plan", "A", "B")) == ("plan", {"titles": ["A", "B"]})
-    assert coordinate.request_args(parse("publish", "2", "--note", "rebased")) == ("publish", {"number": "2", "note": "rebased"})
-    assert coordinate.request_args(parse("send", "impl-2", "carry", "on")) == ("send", {"agent": "impl-2", "message": "carry on"})
+    assert coordinate.request_args(parse("research", "start")) == ("research", {"brief": ""})
+    assert coordinate.request_args(parse("tasks", "set", "A", "B")) == ("plan", {"titles": ["A", "B"]})
+    assert coordinate.request_args(parse("tasks", "approve")) == ("approve", {})
+    assert coordinate.request_args(parse("task", "start", "1")) == ("start", {"number": "1"})
+    assert coordinate.request_args(parse("task", "publish", "2", "--note", "rebased")) == ("publish", {"number": "2", "note": "rebased"})
+    assert coordinate.request_args(parse("prs", "check")) == ("prs", {})
+    assert coordinate.request_args(parse("agent", "send", "impl-2", "carry", "on")) == ("send", {"agent": "impl-2", "message": "carry on"})
+    assert coordinate.request_args(parse("agent", "stop", "impl-2")) == ("stop", {"agent": "impl-2"})
     assert coordinate.request_args(parse("wait", "need", "an", "answer")) == ("wait", {"reason": "need an answer"})
-    assert coordinate.request_args(parse("prs")) == ("prs", {})
+
+
+def test_your_own_jef_commands_are_unchanged():
+    from jef.cli import build_parser
+
+    assert build_parser().parse_args(["status"]).command == "status"
+    assert not getattr(build_parser().parse_args(["stop"]), "coordinator", False)
+    assert getattr(build_parser().parse_args(["task", "start", "1"]), "coordinator", False)
 
 
 # ---- the web page

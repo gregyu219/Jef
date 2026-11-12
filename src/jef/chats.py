@@ -91,12 +91,19 @@ NO_JEF_COMMANDS = ("Bash(jef *)", "Bash(.venv/bin/jef *)")
 
 READ_ONLY = ["Read", "Glob", "Grep"]
 POLICIES: dict[Role, RolePolicy] = {
-    # The coordinator runs its project through ``jef project …`` (Jef carries
-    # each request out), and reads the repo and its PRs. It can't change code.
+    # The coordinator runs its project through its jef commands (``jef task
+    # start 1`` and so on; Jef carries each request out), and reads the repo
+    # and its PRs. It can't change code.
     Role.COORDINATOR: RolePolicy(
         READ_ONLY
         + [
-            "Bash(jef project *)",
+            "Bash(jef overview)",
+            "Bash(jef research *)",
+            "Bash(jef tasks *)",
+            "Bash(jef task *)",
+            "Bash(jef prs *)",
+            "Bash(jef agent *)",
+            "Bash(jef wait *)",
             "Bash(gh pr view *)",
             "Bash(gh pr list *)",
             "Bash(gh pr diff *)",
@@ -301,7 +308,7 @@ class Chats:
         for key in ("JEF_PROJECT", "JEF_AGENT"):
             env.pop(key, None)  # only coordinators get these
         if agent.role is Role.COORDINATOR:
-            # ``jef project …`` reads these to know whose request it is.
+            # The coordinator's jef commands read these to know whose request it is.
             env["JEF_HOME"] = str(self.workspace.root)
             env["JEF_PROJECT"] = project
             env["JEF_AGENT"] = agent.name
