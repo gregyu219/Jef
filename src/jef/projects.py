@@ -11,6 +11,7 @@ GitHub repo and confirm. Starting a project:
 
 from __future__ import annotations
 
+import random
 import re
 import shutil
 import subprocess
@@ -26,7 +27,9 @@ from jef.tasks import TaskList
 from jef.workspace import Workspace
 
 # Coordinators get a person's name, so you can talk to them by name.
+# Each new project gets one at random from those not already in use.
 COORDINATOR_NAMES = [
+    "Taryn", "Miucci", "Joseph", "Serena", "Jerry", "Billy", "David",
     "Ada", "Grace", "Linus", "Barbara", "Ken", "Margaret", "Dennis", "Frances",
     "Alan", "Radia", "Guido", "Hedy", "Edsger", "Katherine", "Donald", "Lynn",
 ]
@@ -80,11 +83,11 @@ def slugify(text: str, taken: set[str]) -> str:
     return slug
 
 
-def pick_coordinator_name(backlog: Backlog) -> str:
+def pick_coordinator_name(backlog: Backlog, choose: Callable[[list[str]], str] = random.choice) -> str:
     used = {i.coordinator for i in backlog.items}
-    for name in COORDINATOR_NAMES:
-        if name not in used:
-            return name
+    free = [name for name in COORDINATOR_NAMES if name not in used]
+    if free:
+        return choose(free)
     return f"Coordinator {len(used) + 1}"
 
 
@@ -186,6 +189,7 @@ def start_project(
     repo_text: str,
     chats: Chats,
     clone: Callable[[str, Path], None] = gh_clone,
+    choose_name: Callable[[list[str]], str] = random.choice,
 ) -> Project:
     backlog = Backlog.load(ws.backlog_file)
     item = next((i for i in backlog.items if i.number == number), None)
@@ -196,7 +200,7 @@ def start_project(
     repo = parse_repo(repo_text)
 
     slug = slugify(item.feature, set(ws.project_slugs()))
-    coordinator = pick_coordinator_name(backlog)
+    coordinator = pick_coordinator_name(backlog, choose_name)
     folder = ws.project_dir(slug)
     folder.mkdir(parents=True)
     try:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -58,6 +59,7 @@ def create_app(
     chats: Chats | None = None,
     clone: Callable[[str, Path], None] = gh_clone,
     pipeline: Pipeline | None = None,
+    choose_name: Callable[[list[str]], str] = random.choice,
 ) -> FastAPI:
     """``claude_status`` is the result of the check ``jef`` ran on startup, if any."""
     ws = workspace or Workspace.default()
@@ -157,7 +159,7 @@ def create_app(
         if runner is None:
             return again("Claude Code isn't working yet, so no agent can start. See Settings.")
         try:
-            project = start_project(ws, number, repo, runner, clone=clone)
+            project = start_project(ws, number, repo, runner, clone=clone, choose_name=choose_name)
         except StartError as err:
             return again(str(err))
         return RedirectResponse(f"/projects/{project.slug}", status_code=303)
