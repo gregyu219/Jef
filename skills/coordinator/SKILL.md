@@ -130,7 +130,11 @@ Each heartbeat, go through this:
 1. `jef overview`, to see where everything is.
 2. **Implementers still working** whose last reply wasn't `ready`: nudge them
    with `jef agent send impl-N "Heartbeat: carry on; report STATUS: ready with a pr block when it's committed and tested."`
-3. **Open PRs**: run `jef prs check`.
+3. **Open PRs**: Jef checks PRs waiting for review for merges by itself
+   every few minutes. When one merges, it records it, stops that
+   implementer and wakes you with "PR #N merged": that means start the next
+   task (see Merged, below). To check for conflicts or closed PRs, run
+   `jef prs check`.
    - **Merged**: Jef records it and stops that implementer. Look at what
      merged (`git fetch`, `git log origin/main`), then decide what's next:
      start every task that's now unblocked (everything it needs has merged),

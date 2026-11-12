@@ -10,7 +10,7 @@ from jef.chats import Chats, ChatError, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus
 from jef import coordinate, inbox, models
-from jef.pipeline import Heartbeat, Phase, Pipeline, PipelineError, last_reply, parse_pr, pr_label
+from jef.pipeline import PR_POLL_SECONDS, Heartbeat, Phase, Pipeline, PipelineError, last_reply, parse_pr, pr_label
 from jef.publish import PublishError
 from jef.projects import goal_fields, set_goal_field, slugify, start_project
 from jef.status import read_status, status_path
@@ -432,6 +432,105 @@ def test_a_new_pr_links_the_closed_one(w):
     w.reply("impl-1", READY)
     assert w.ok("publish", number="1") == f"Opened PR #21: {PR21}"
     assert w.publisher.calls[-1][3].startswith(f"Replaces {PR20}, which was closed without merging.")
+
+
+def counting_pr_state(w):
+    """Swap in a pr_state that records which PRs Jef asked GitHub about."""
+    asked = []
+
+    def pr_state(url):
+        asked.append(url)
+        return w.pr_states.get(url, "OPEN")
+
+    w.pipeline.pr_state = pr_state
+    return asked
+
+
+def test_jefs_timer_spots_a_merge_and_wakes_the_coordinator(w):
+    p, slug = w.pipeline, w.slug
+    pr_open(w)
+    asked = counting_pr_state(w)
+    beat = Heartbeat(p)
+    beat.tick_all()
+    assert asked == [PR20]  # still open: nothing changes, Ada isn't woken
+    assert p.tasks(slug).tasks[0].status is TaskStatus.PENDING_REVIEW
+    turns = len(w.procs["ada"])
+
+    w.pr_states[PR20] = "MERGED"
+    w.clock += PR_POLL_SECONDS - 1
+    beat.tick_all()
+    assert asked == [PR20] and len(w.procs["ada"]) == turns  # not time to ask yet
+
+    w.clock += 1
+    beat.tick_all()
+    assert asked == [PR20, PR20]
+    assert p.tasks(slug).tasks[0].status is TaskStatus.MERGED
+    assert goal_fields(w.ws, slug)["last merged"] == PR20
+    assert w.agent("impl-1").status is Status.STOPPED
+    assert "PR #20 merged (task 1: A)" in w.last_message("ada")
+    assert "start the next task" in w.last_message("ada")
+    assert "| 1 | A | Merged |" in status_path(w.ws, slug).read_text()
+    w.ok("start", number="2")
+    assert w.agent("impl-2").note == "Started by Ada after PR #20 merged"
+
+
+def test_jefs_timer_only_asks_about_prs_waiting_for_review(w):
+    p, slug = w.pipeline, w.slug
+    pr_open(w, titles=("A", "B", "C"))
+    tasks = p.tasks(slug)
+    tasks.tasks[1].status, tasks.tasks[1].pr = TaskStatus.IMPLEMENTATION, PR21
+    tasks.tasks[2].status, tasks.tasks[2].pr = TaskStatus.MERGED, "https://github.com/gregyu219/Jef/pull/9"
+    p._save_tasks(slug, tasks)
+    asked = counting_pr_state(w)
+    p.poll_merges(slug)
+    assert asked == [PR20]
+
+
+def test_jefs_timer_changes_nothing_without_a_merge(w):
+    p, slug = w.pipeline, w.slug
+    pr_open(w)
+    turns = len(w.procs["ada"])
+    for answer in ("", "CLOSED", "OPEN"):
+        w.pr_states[PR20] = answer
+        assert p.poll_merges(slug) == []
+        p.tick(slug)
+        w.clock += PR_POLL_SECONDS
+    assert p.tasks(slug).tasks[0].status is TaskStatus.PENDING_REVIEW
+    assert "last merged" not in goal_fields(w.ws, slug)
+    assert w.agent("impl-1").status is not Status.STOPPED
+    assert len(w.procs["ada"]) == turns
+
+
+def test_jefs_timer_finishes_the_project_on_the_last_merge(w):
+    p, slug = w.pipeline, w.slug
+    pr_open(w, titles=("A",))
+    w.pr_states[PR20] = "MERGED"
+    assert p.poll_merges(slug) == ["PR #20 merged (task 1: A). Jef recorded it and stopped impl-1; start the next task."]
+    assert p.phase(slug) is Phase.DONE
+    assert Backlog.load(w.ws.backlog_file).items[0].status is BacklogStatus.DONE
+    assert "1 of 1 merged" in status_path(w.ws, slug).read_text()
+
+
+def test_a_merge_seen_by_both_checks_is_recorded_once(w):
+    p, slug = w.pipeline, w.slug
+    pr_open(w)
+    w.pr_states[PR20] = "MERGED"
+    assert "merged" in w.ok("prs")
+    assert p.poll_merges(slug) == []  # already Merged, so not asked or announced again
+    w.ok("start", number="2")
+    w.reply("impl-2", READY)
+    w.ok("publish", number="2")
+    w.clock += PR_POLL_SECONDS
+
+    def raced(url):  # `jef prs check` records the merge while Jef is asking
+        tasks = p.tasks(slug)
+        tasks.tasks[1].status = TaskStatus.MERGED
+        p._save_tasks(slug, tasks)
+        return "MERGED"
+
+    p.pr_state = raced
+    assert p.poll_merges(slug) == []
+    assert p.tasks(slug).tasks[1].status is TaskStatus.MERGED
 
 
 def test_a_spent_budget_pauses_the_project_until_you_raise_it(w):
