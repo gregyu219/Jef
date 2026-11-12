@@ -114,6 +114,94 @@ To see every project at once, press **Read status** above the Projects table on 
 
 Tasks are built **one at a time**, because they usually build on each other. The coordinator starts the next task after you merge the last one's PR. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
 
+### The whole loop
+
+Three kinds of program take part. **You** use Jef's web page. **The running Jef** (`jef start`) is the only thing that launches agents, writes the project's files and pushes code. **Agents** (the coordinator, the research agent, implementers) are Claude Code sessions that only run while they answer a message.
+
+**Jef's timer.** This runs inside the running Jef. It never calls Claude to decide anything. A turn only starts when Jef wakes the coordinator, or when the coordinator asks for one.
+
+```mermaid
+flowchart TD
+    A([Every 2 seconds]) --> B[Touch jef.alive]
+    B --> C{Requests in<br/>projects/*/requests/ ?}
+    C -- yes --> D[Check the rules, then do it:<br/>start an agent, send a message,<br/>push and open a PR, ask GitHub]
+    D --> E[Write the answer file]
+    C -- no --> A
+    E --> A
+
+    T([Every 30 seconds, for each project]) --> U[Mark finished agents Idle<br/>Save research.md<br/>Update status.md<br/>Check the budget]
+    U --> V{Coordinator idle?}
+    V -- no --> T
+    V -- yes --> W{Any of these?<br/>an agent finished a turn<br/>you pressed a button<br/>its heartbeat is due}
+    W -- no --> T
+    W -- yes --> X[Wake the coordinator:<br/>a new turn with the news<br/>and the project status]
+    X --> T
+```
+
+**One project, start to finish.** Every arrow into an agent is a message that starts one of its turns. Every `jef …` command the coordinator runs is a request that Jef answers within a couple of seconds.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You
+    participant Jef as Running Jef
+    participant Ada as Coordinator (Ada)
+    participant R as Research agent
+    participant I as Implementer (impl-1)
+    participant GH as GitHub
+
+    You->>Jef: Start backlog item, pick the repo
+    Jef->>Ada: First message (her first turn)
+    Ada-->>You: What I understand, any questions
+    You->>Ada: go
+    Ada->>Jef: jef research start
+    Jef->>R: Spawn the research agent
+    R-->>Jef: Findings (its turn ends)
+    Jef->>Jef: Save research.md
+    Jef->>Ada: Wake: research finished
+    Ada->>Jef: jef tasks set "Task 1" "Task 2"
+    Ada-->>You: Here's the plan, please approve
+    You->>Jef: Approve
+    Jef->>Ada: Wake: the person approved
+    Ada->>Jef: jef task start 1
+    Jef->>I: Spawn impl-1 on branch jef/project/task-1
+
+    loop Until task 1 is ready
+        I-->>Jef: Turn ends (STATUS: working)
+        Jef->>Ada: Wake: impl-1 finished a turn
+        Ada->>Jef: jef agent read impl-1
+        Ada->>Jef: jef agent send impl-1 "carry on"
+        Jef->>I: Next turn
+    end
+
+    I-->>Jef: Turn ends (STATUS: ready, with a pr block)
+    Jef->>Ada: Wake: impl-1 finished a turn
+    Ada->>Jef: jef task publish 1
+    Jef->>Jef: Secret check
+    Jef->>GH: Push the branch, open the PR
+    You->>GH: Review and merge
+
+    loop Every heartbeat (an hour by default)
+        Jef->>Ada: Wake: heartbeat
+        Ada->>Jef: jef prs check
+        Jef->>GH: State of each PR?
+        alt Merged
+            Jef->>Jef: Mark task merged, stop impl-1
+            Ada->>Jef: jef task start 2
+        else Merge conflicts
+            Ada->>Jef: jef agent send impl-1 "rebase on main"
+            Note over I: Rebases, tests, STATUS: ready
+            Ada->>Jef: jef task publish 1 --note "Rebased"
+        else Still waiting for review
+            Ada-->>You: Nothing to do yet
+        end
+    end
+
+    Note over Jef,Ada: When jef prs check finds every task merged,<br/>the project is Done and Jef stops Ada.
+```
+
+If an implementer is stuck, or Ada needs a decision, she asks you and runs `jef wait "…"`. The project page then shows what she's waiting for, and heartbeats pause until she starts a task or you press **Try again**.
+
 ### How agents hand work back
 
 Research and implementation agents only reply in text, to their coordinator:
