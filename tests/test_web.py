@@ -56,6 +56,52 @@ def test_user_text_is_escaped(client):
     assert "&lt;script&gt;" in response.text
 
 
+STARTED_AND_WAITING = """# Backlog
+
+| # | Feature | Status | Coordinator |
+| --- | --- | --- | --- |
+| 1 | To-do list app | In progress | Ada |
+| 2 | Dark mode | Waiting | |
+"""
+
+
+def test_home_page_shows_delete_only_for_waiting_items(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    page = client.get("/")
+    assert 'action="/backlog/2/delete"' in page.text
+    assert 'action="/backlog/1/delete"' not in page.text
+
+
+def test_deleting_a_waiting_item_removes_it(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    response = client.post("/backlog/2/delete", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    assert [i.number for i in Backlog.load(ws.backlog_file).items] == [1]
+    assert "Dark mode" not in client.get("/").text
+
+
+def test_deleting_a_started_item_is_refused(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    response = client.post("/backlog/1/delete", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/?error=delete"
+    assert ws.backlog_file.read_text() == STARTED_AND_WAITING
+    assert "can't be deleted" in client.get("/?error=delete").text
+
+
+def test_delete_confirmation_text_cannot_break_out_of_the_script(client):
+    client.post("/backlog", data={"feature": "Bob's \"quoted\" </script> idea"})
+    page = client.get("/").text
+    start = page.index("onsubmit='") + len("onsubmit='")
+    handler = page[start:page.index("'", start)]
+    assert handler.startswith("return confirm(\"Delete")
+    assert "</script>" not in handler
+
+
 def test_settings_shows_claude_code_is_working(ws):
     app = create_app(ws, github_check=lambda: GitHubStatus(True, "octocat"), claude_status=ClaudeCheck(True, path="/opt/claude"))
     page = TestClient(app).get("/settings").text
