@@ -53,7 +53,7 @@ class World:
         self.chats = Chats(self.ws, "/bin/claude", popen=self.popen)
         self.git = FakeGit()
         self.pipeline = Pipeline(self.ws, self.chats, git=self.git, pr_state=lambda url: self.pr_states.get(url, "OPEN"), now=lambda: self.clock)
-        project = start_project(self.ws, 1, "gregyu219/Jef", self.chats, clone=lambda repo, dest: dest.mkdir(parents=True))
+        project = start_project(self.ws, 1, "gregyu219/Jef", self.chats, clone=lambda repo, dest: dest.mkdir(parents=True), choose_name=lambda names: sorted(names)[0])
         self.slug = project.slug
 
     def popen(self, cmd, **kwargs):

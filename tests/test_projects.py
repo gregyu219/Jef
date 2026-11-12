@@ -10,6 +10,10 @@ from jef.web.app import create_app
 from jef.workspace import Workspace
 
 
+def alphabetical(names):
+    return sorted(names)[0]
+
+
 class FakeProc:
     def __init__(self, cmd, **kwargs):
         self.cmd, self.kwargs, self.done = cmd, kwargs, False
@@ -59,7 +63,7 @@ def test_slugify_avoids_clashes():
 
 def test_starting_a_project(env):
     ws, chats, clone, procs, clones = env
-    project = start_project(ws, 1, "gregyu219/Jef", chats, clone=clone)
+    project = start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)
     assert (project.slug, project.coordinator) == ("weekly-email-summary", "Ada")
     assert clones == ["gregyu219/Jef"]
     folder = ws.project_dir(project.slug)
@@ -75,9 +79,9 @@ def test_starting_a_project(env):
     assert (item.status, item.coordinator) == (BacklogStatus.IN_PROGRESS, "Ada")
     assert load_project(ws, project.slug).repo == "gregyu219/Jef"
     # The next project gets the next name, and an item can't start twice.
-    assert start_project(ws, 2, "gregyu219/Jef", chats, clone=clone).coordinator == "Grace"
+    assert start_project(ws, 2, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical).coordinator == "Alan"
     with pytest.raises(StartError, match="already been started"):
-        start_project(ws, 1, "gregyu219/Jef", chats, clone=clone)
+        start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)
 
 
 def test_a_failed_clone_leaves_nothing_behind(env):
@@ -102,6 +106,7 @@ def client(env):
         claude_status=ClaudeCheck(True, path="/bin/claude"),
         chats=chats,
         clone=clone,
+        choose_name=alphabetical,
     )
     return TestClient(app)
 
@@ -159,3 +164,21 @@ def test_unknown_projects_and_traversal_go_home(client):
     assert client.get("/projects/nope").url.path == "/"
     sneaky = client.get("/projects/..%2F..%2Fetc")
     assert sneaky.status_code == 404 or sneaky.url.path == "/"
+
+
+def test_coordinator_names_are_random_among_unused(env):
+    from jef.projects import COORDINATOR_NAMES, pick_coordinator_name
+
+    backlog = Backlog()
+    seen = set()
+    for _ in range(200):
+        seen.add(pick_coordinator_name(backlog))
+    assert len(seen) > 10  # not always the same name
+    assert {"Taryn", "Joseph", "Serena", "David"} <= set(COORDINATOR_NAMES)
+    for name in COORDINATOR_NAMES[:-1]:
+        backlog.add(name)
+        backlog.items[-1].coordinator = name
+    assert pick_coordinator_name(backlog) == COORDINATOR_NAMES[-1]
+    backlog.add("one more")
+    backlog.items[-1].coordinator = COORDINATOR_NAMES[-1]
+    assert pick_coordinator_name(backlog) == f"Coordinator {len(COORDINATOR_NAMES) + 1}"
