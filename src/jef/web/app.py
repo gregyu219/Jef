@@ -20,7 +20,16 @@ from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError
 from jef.projects import StartError, gh_clone, known_repos, load_project, parse_repo, projects_on_repo, start_project, used_backlog_numbers
 from jef.status import read_status, status_path, write_status
 from jef.tasks import TaskList, TaskStatus
-from jef.usage import Usage, agent_usage, format_cost, format_tokens, project_total, project_usage
+from jef.usage import (
+    Usage,
+    agent_usage,
+    budget_left,
+    budget_usd,
+    format_cost,
+    format_tokens,
+    project_total,
+    project_usage,
+)
 from jef.workspace import Workspace
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -125,7 +134,7 @@ def create_app(
         """Agents can only run once Claude Code has been checked and works."""
         status = app.state.claude
         if app.state.chats is None and status is not None and status.ok:
-            app.state.chats = Chats(ws, status.path)
+            app.state.chats = Chats(ws, status.path, budget_left=lambda slug: budget_left(ws, slug))
         return app.state.chats
 
     def get_jef_chats() -> Chats | None:
@@ -328,6 +337,7 @@ def create_app(
                 "at_once": IMPLEMENTERS_AT_ONCE,
                 "usage": usage,
                 "usage_total": sum(usage.values(), Usage()),
+                "budget": budget_usd(ws, slug),
                 "no_usage": Usage(),
                 "error": error,
             },
@@ -377,6 +387,18 @@ def create_app(
     def set_coordinator_starts(slug: str, on: str = Form("")):
         return pipeline_action(slug, lambda flow: flow.set_coordinator_starts(slug, on == "yes"))
 
+    @app.post("/projects/{slug}/budget")
+    def set_budget(slug: str, amount: str = Form("")):
+        text = amount.strip().removeprefix("$").replace(",", "")
+        if text.lower() in ("", "none"):
+            value = None
+        else:
+            try:
+                value = float(text)
+            except ValueError:
+                return RedirectResponse(f"/projects/{slug}?error=Type+a+dollar+amount,+like+20.", status_code=303)
+        return pipeline_action(slug, lambda flow: flow.set_budget_usd(slug, value))
+
     @app.get("/projects/{slug}/agents/{name}", response_class=HTMLResponse)
     def agent_page(request: Request, slug: str, name: str):
         project = known(slug)
@@ -410,7 +432,9 @@ def create_app(
         try:
             runner.send(slug, project.coordinator_agent, message.strip())
         except ChatError as err:
-            return RedirectResponse(f"/projects/{slug}?error=" + ("busy" if "still working" in str(err) else "stopped"), status_code=303)
+            said = str(err)
+            reason = "busy" if "still working" in said else "budget" if "budget" in said else "stopped"
+            return RedirectResponse(f"/projects/{slug}?error={reason}", status_code=303)
         return RedirectResponse(f"/projects/{slug}", status_code=303)
 
     @app.post("/projects/{slug}/stop")

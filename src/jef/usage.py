@@ -6,6 +6,9 @@ counts and ``total_cost_usd``, Claude Code's own estimate at list price. Jef
 adds those up straight from the logs, so there's no separate usage file to
 drift out of step. A turn that was stopped before it finished writes no
 ``result`` event, so its usage isn't counted.
+
+A project can have a dollar budget, a ``- Budget: 20.00 USD`` line in its
+goal.md. ``budget_left`` is what Jef checks before starting any turn.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from jef.projects import goal_fields
 from jef.workspace import Workspace
 
 
@@ -98,6 +102,31 @@ def project_total(ws: Workspace, slug: str) -> Usage:
     for used in project_usage(ws, slug).values():
         total += used
     return total
+
+
+def parse_budget(value: str) -> float | None:
+    """The dollar amount in a goal.md ``Budget`` value like "20.00 USD" or
+    "$20", or None for "none", empty or nonsense."""
+    text = value.strip().lower().removeprefix("$").removesuffix("usd").strip()
+    try:
+        amount = float(text)
+    except ValueError:
+        return None
+    return amount if amount > 0 and amount != float("inf") else None
+
+
+def budget_usd(ws: Workspace, slug: str) -> float | None:
+    """The project's dollar budget from goal.md, or None if it has none."""
+    return parse_budget(goal_fields(ws, slug).get("budget", ""))
+
+
+def budget_left(ws: Workspace, slug: str) -> float | None:
+    """Dollars left in the project's budget (0 or less once it's used up),
+    or None if the project has no budget."""
+    budget = budget_usd(ws, slug)
+    if budget is None:
+        return None
+    return budget - project_total(ws, slug).cost_usd
 
 
 def format_tokens(count: int) -> str:

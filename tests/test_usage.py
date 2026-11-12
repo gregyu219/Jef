@@ -5,7 +5,15 @@ from fastapi.testclient import TestClient
 from jef.chats import Agent, Role, save_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus
-from jef.usage import Usage, agent_usage, format_cost, format_tokens, project_total, project_usage, usage_from_event
+from jef.usage import (
+    Usage,
+    agent_usage,
+    budget_left,
+    budget_usd,
+    format_cost,
+    parse_budget,
+)
+from jef.usage import format_tokens, project_total, project_usage, usage_from_event
 from jef.web.app import create_app
 from jef.workspace import Workspace
 
@@ -72,6 +80,26 @@ def test_project_usage_by_agent_and_total(tmp_path):
     total = project_total(ws, "demo")
     assert total.turns == 3 and abs(total.cost_usd - 3 * 0.2268) < 1e-9
     assert project_total(ws, "nothing-here") == Usage()
+
+
+def test_budget_is_read_from_goal_md(tmp_path):
+    ws = Workspace(tmp_path)
+    folder = ws.project_dir("demo")
+    folder.mkdir(parents=True)
+    goal = folder / "goal.md"
+    goal.write_text("# Goal: Demo\n\n- Repo: o/r\n")
+    assert budget_usd(ws, "demo") is None and budget_left(ws, "demo") is None
+    goal.write_text("# Goal: Demo\n\n- Repo: o/r\n- Budget: 1.00 USD\n")
+    write_log(folder / "chats" / "ada.jsonl", RESULT, RESULT)
+    assert budget_usd(ws, "demo") == 1.0
+    assert abs(budget_left(ws, "demo") - (1 - 2 * 0.2268)) < 1e-9
+
+
+def test_parse_budget():
+    assert parse_budget("20.00 USD") == 20.0
+    assert parse_budget("$5") == 5.0
+    for nothing in ("", "none", "0", "-4", "lots", "nan", "inf"):
+        assert parse_budget(nothing) is None
 
 
 def test_formatting():

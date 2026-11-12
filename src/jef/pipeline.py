@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from jef import skills
+from jef import skills, usage
 from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Agent, Chats, ChatError, Reply, Role, Status
 from jef.projects import (
@@ -86,6 +86,8 @@ STATUS_LINE = re.compile(r"^\s*STATUS:\s*(working|ready|pr-opened|stuck)\b(.*)$"
 PR_BLOCK = re.compile(r"```pr\s*\n(.*?)```", re.S | re.I)
 MAX_PUBLISH_ATTEMPTS = 3
 PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+BUDGET_PROBLEM = "Budget reached"  # how a budget pause starts, so raising the budget can lift it
+MAX_BUDGET_USD = 100_000
 
 
 class PipelineError(RuntimeError):
@@ -300,6 +302,35 @@ class Pipeline:
                 if WAITING in self.problem(slug):
                     set_goal_field(self.workspace, slug, "Problem", "none")
 
+    def budget_usd(self, slug: str) -> float | None:
+        return usage.budget_usd(self.workspace, slug)
+
+    def set_budget_usd(self, slug: str, amount: float | None) -> None:
+        """Set the project's dollar budget, or None for no budget. The pause
+        starts or lifts straight away."""
+        if amount is not None and not 0 < amount <= MAX_BUDGET_USD:
+            raise PipelineError(f"Pick a budget above $0 and up to ${MAX_BUDGET_USD:,}, or leave it empty for none.")
+        with self.chats.lock:
+            set_goal_field(self.workspace, slug, "Budget", f"{amount:.2f} USD" if amount is not None else "none")
+            over = self._budget_problem(slug)
+            if over:
+                set_goal_field(self.workspace, slug, "Problem", over)
+            elif self.problem(slug).startswith(BUDGET_PROBLEM):
+                set_goal_field(self.workspace, slug, "Problem", "none")
+
+    def _budget_problem(self, slug: str) -> str:
+        """Why the project is paused for its budget, or "" if it isn't."""
+        budget = self.budget_usd(slug)
+        if budget is None:
+            return ""
+        spent = usage.project_total(self.workspace, slug).cost_usd
+        if spent < budget:
+            return ""
+        return (
+            f"{BUDGET_PROBLEM}: {usage.format_cost(spent)} of {usage.format_cost(budget)} used (estimated). "
+            "Raise the budget to carry on."
+        )
+
     def phase(self, slug: str) -> Phase:
         return project_phase(self.workspace, slug, self.chats.refresh(slug))
 
@@ -343,6 +374,12 @@ class Pipeline:
     def tick(self, slug: str) -> None:
         with self.chats.lock:
             if load_project(self.workspace, slug) is None or self.phase(slug) in (Phase.DONE, Phase.STOPPED):
+                return
+            over = self._budget_problem(slug)
+            if over:
+                # Paused: no new turns, and replies wait until the budget is raised.
+                if self.problem(slug) != over:
+                    set_goal_field(self.workspace, slug, "Problem", over)
                 return
             for agent in self.chats.refresh(slug):
                 if agent.status is Status.WORKING:
@@ -392,7 +429,10 @@ class Pipeline:
 
     def _on_reply(self, slug: str, agent: Agent, reply: Reply) -> None:
         if reply.is_error:
-            agent.note = "Last turn failed: " + _short(reply.text)
+            if "budget" in reply.subtype:
+                agent.note = "Last turn stopped partway: it reached the project budget"
+            else:
+                agent.note = "Last turn failed: " + _short(reply.text or reply.subtype)
             return
         if agent.role is Role.COORDINATOR:
             phase = self.phase(slug)
