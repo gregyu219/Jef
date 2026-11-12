@@ -58,6 +58,11 @@ ALWAYS_DENIED = [
     "Bash(git push * HEAD:main)",
     "Bash(git push --force*)",
     "Bash(git push -f*)",
+    # The same, with git's options before the command (git -C <folder> push).
+    "Bash(git -C * push*)",
+    "Bash(git -c * push*)",
+    "Bash(git --git-dir* push*)",
+    "Bash(git --work-tree* push*)",
 ]
 
 

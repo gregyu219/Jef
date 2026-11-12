@@ -96,8 +96,12 @@ When an implementer finishes a turn, read it (`jef project read impl-1`). Its
 reply ends with a status line:
 
 - `STATUS: working …`: nothing to do yet.
-- `STATUS: ready` with a `pr` block: check it looks right (look at its
-  commits if you like), then run `jef project publish 1`. If Jef refuses (for
+- `STATUS: ready` with a `pr` block: check it looks right, then run
+  `jef project publish 1`. Implementers' branches are in your own clone, so
+  you can look at the work from your folder with
+  `git log origin/main..jef/<project>/task-1` and
+  `git diff origin/main...jef/<project>/task-1` (the branch name is in
+  `jef project status`'s agents list and in the implementer's first message). If Jef refuses (for
   example uncommitted changes, or something that looks like a secret), send
   the reason to the implementer with `jef project send`.
 - `STATUS: stuck …`: answer it yourself if you can, with `send`. If it needs
