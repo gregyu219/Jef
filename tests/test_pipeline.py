@@ -303,6 +303,90 @@ def approved_with_one_task(w):
     w.pipeline.approve_tasks(w.slug)
 
 
+def tasks_waiting(w, block="```tasks\n1. A\n2. B\n```"):
+    w.pipeline.start_research(w.slug)
+    w.reply("ada", "hi")
+    w.reply("research", "findings")
+    w.reply("ada", block)
+    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
+
+
+def test_the_coordinator_is_asked_to_decide_once_per_heartbeat(w):
+    tasks_waiting(w)
+    turns = len(w.procs["ada"])
+    w.clock += 59 * 60
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns  # you get a full interval to approve by hand
+    w.clock += 60
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns + 1
+    message = w.last_message("ada")
+    assert "waited about 60 minutes" in message and "ACTION: approve-tasks" in message
+    assert "1. A\n2. B" in message
+    w.reply("ada", "I'd like to hear from the person first. Is B needed?")
+    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
+    w.clock += 30 * 60
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns + 1  # not again until the next interval
+    w.clock += 30 * 60
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns + 2
+
+
+def test_the_coordinator_approves_with_the_marker(w):
+    tasks_waiting(w)
+    w.clock += 3600
+    w.pipeline.tick(w.slug)
+    w.reply("ada", "The list covers the request.\nACTION: approve-tasks")
+    assert w.pipeline.phase(w.slug) is Phase.BUILDING
+    assert "impl-1" in w.procs
+    assert w.agent("ada").note == "Approved the tasks"
+
+
+def test_a_new_list_and_the_marker_in_one_reply_does_not_approve(w):
+    tasks_waiting(w, "```tasks\n1. A\n```\nACTION: approve-tasks")
+    assert "impl-1" not in w.procs
+    # A revised list with the marker while waiting is saved but not approved either.
+    w.reply("ada", "```tasks\n1. A1\n```\nACTION: approve-tasks")
+    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
+    assert [t.title for t in w.pipeline.tasks(w.slug).tasks] == ["A1"]
+
+
+def test_a_revised_list_restarts_the_wait(w):
+    tasks_waiting(w)
+    turns = len(w.procs["ada"])
+    w.clock += 40 * 60
+    w.chats.send(w.slug, "ada", "drop B")
+    w.reply("ada", "```tasks\n1. A\n```")
+    w.clock += 40 * 60
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns + 1  # only your message, no heartbeat yet
+    w.clock += 20 * 60
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns + 2
+    assert "Heartbeat" in w.last_message("ada")
+
+
+def test_a_busy_coordinator_is_not_asked_to_decide(w):
+    tasks_waiting(w)
+    w.chats.send(w.slug, "ada", "what about tests?")
+    turns = len(w.procs["ada"])
+    w.clock += 3600
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns  # still answering you
+    w.reply("ada", "Task 2 adds them.")
+    assert len(w.procs["ada"]) == turns + 1
+    assert "Heartbeat" in w.last_message("ada")
+
+
+def test_check_now_does_not_ask_for_a_decision_early(w):
+    tasks_waiting(w)
+    turns = len(w.procs["ada"])
+    w.clock += 30 * 60
+    w.pipeline.check_now(w.slug)
+    assert len(w.procs["ada"]) == turns
+
+
 def test_check_now_notices_a_merge_straight_away_without_nudging(w):
     w.pipeline.start_research(w.slug)
     w.reply("ada", "hi")
