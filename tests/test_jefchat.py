@@ -138,11 +138,13 @@ def client(env):
     return TestClient(app), ws, chats, procs
 
 
-def test_home_page_shows_the_jef_chat_first(client):
+def test_home_page_shows_the_backlog_before_the_chat(client):
     c, _, _, _ = client
     page = c.get("/").text
     assert "Chat with Jef" in page and 'action="/jef/message"' in page
-    assert page.index("Chat with Jef") < page.index("<h2>Backlog</h2>")
+    assert page.index('id="usage"') < page.index("<h2>Backlog</h2>")
+    assert page.index("<h2>Backlog</h2>") < page.index("Chat with Jef")
+    assert page.index("Chat with Jef") < page.index('id="projects"')
     assert "No messages yet" in page
 
 

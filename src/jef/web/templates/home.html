@@ -32,38 +32,7 @@
     {% endif %}
     <p class="total">Jef's estimated cost, all projects: <strong>{{ total_cost | cost }}</strong> <span class="hint">(Claude Code's list-price estimate)</span></p>
   </section>
-  <section id="jef">
-    <h2>Chat with Jef</h2>
-    <p class="hint">Ask about your backlog and how projects are going. Jef starts with a briefing on both, and can read the details but can't change anything. Reset saves this conversation and starts Jef fresh with a new briefing.</p>
-    {% if jef_working %}<p class="hint">Working… this page refreshes by itself.</p>{% endif %}
-    {% if jef_chat %}
-    <ol class="chat">
-      {% for line in jef_chat %}
-      <li class="{{ line.kind }}">{{ line.text }}</li>
-      {% endfor %}
-    </ol>
-    {% else %}
-    <p class="empty">No messages yet. Your first message starts the chat.</p>
-    {% endif %}
-    {% if jef_ok %}
-    <form method="post" action="/jef/message">
-      <input type="text" name="message" placeholder="Message Jef" aria-label="Message Jef" autocomplete="off">
-      <button type="submit">Send</button>
-    </form>
-    <form method="post" action="/jef/reset" class="inline"
-          onsubmit='return confirm("Start Jef over? The current conversation is saved, and Jef starts fresh with a new briefing.")'>
-      <button type="submit" class="secondary">Reset</button>
-    </form>
-    {% else %}
-    <p class="hint">Jef's chat starts once Claude Code works. <a href="/settings">See Settings</a>.</p>
-    {% endif %}
-    {% if error == "jef-empty" %}<p class="error">Type a message first.</p>{% endif %}
-    {% if error == "jef-busy" %}<p class="error">Jef is still working on the last message. Send this when it's done.</p>{% endif %}
-    {% if error == "jef-failed" %}<p class="error">Jef couldn't take that message. Try again.</p>{% endif %}
-    {% if error == "jef-claude" %}<p class="error">Claude Code isn't working right now. See Settings.</p>{% endif %}
-  </section>
-
-  <section>
+  <section id="backlog">
     <h2>Backlog</h2>
     <p class="hint">Everything you've asked for. Nothing starts until you press Start and confirm.</p>
     {% if backlog %}
@@ -107,6 +76,37 @@
     </form>
     {% if error == "empty" %}<p class="error">Type a description first.</p>{% endif %}
     {% if error == "delete" %}<p class="error">That item couldn't be deleted. Try again.</p>{% endif %}
+  </section>
+
+  <section id="jef">
+    <h2>Chat with Jef</h2>
+    <p class="hint">Ask about your backlog and how projects are going. Jef starts with a briefing on both, and can read the details but can't change anything. Reset saves this conversation and starts Jef fresh with a new briefing.</p>
+    {% if jef_working %}<p class="hint">Working… this page refreshes by itself.</p>{% endif %}
+    {% if jef_chat %}
+    <ol class="chat">
+      {% for line in jef_chat %}
+      <li class="{{ line.kind }}">{{ line.text }}</li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="empty">No messages yet. Your first message starts the chat.</p>
+    {% endif %}
+    {% if jef_ok %}
+    <form method="post" action="/jef/message">
+      <input type="text" name="message" placeholder="Message Jef" aria-label="Message Jef" autocomplete="off">
+      <button type="submit">Send</button>
+    </form>
+    <form method="post" action="/jef/reset" class="inline"
+          onsubmit='return confirm("Start Jef over? The current conversation is saved, and Jef starts fresh with a new briefing.")'>
+      <button type="submit" class="secondary">Reset</button>
+    </form>
+    {% else %}
+    <p class="hint">Jef's chat starts once Claude Code works. <a href="/settings">See Settings</a>.</p>
+    {% endif %}
+    {% if error == "jef-empty" %}<p class="error">Type a message first.</p>{% endif %}
+    {% if error == "jef-busy" %}<p class="error">Jef is still working on the last message. Send this when it's done.</p>{% endif %}
+    {% if error == "jef-failed" %}<p class="error">Jef couldn't take that message. Try again.</p>{% endif %}
+    {% if error == "jef-claude" %}<p class="error">Claude Code isn't working right now. See Settings.</p>{% endif %}
   </section>
 
   <section id="projects">
