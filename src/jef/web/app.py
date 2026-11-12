@@ -381,7 +381,6 @@ def create_app(
                 "status_text": status_path(ws, slug).read_text(encoding="utf-8") if status_path(ws, slug).exists() else "",
                 "heartbeat": flow.heartbeat_minutes(slug) if flow else 60,
                 "coordinator_decides": flow.coordinator_decides(slug) if flow else True,
-                "coordinator_starts": flow.coordinator_starts(slug) if flow else True,
                 "last_checked": ago(flow.now() - checked) if checked is not None else "",
                 "at_once": IMPLEMENTERS_AT_ONCE,
                 "usage": usage,
@@ -432,9 +431,9 @@ def create_app(
     def set_coordinator_decides(slug: str, on: str = Form("")):
         return pipeline_action(slug, lambda flow: flow.set_coordinator_decides(slug, on == "yes"))
 
-    @app.post("/projects/{slug}/coordinator-starts")
-    def set_coordinator_starts(slug: str, on: str = Form("")):
-        return pipeline_action(slug, lambda flow: flow.set_coordinator_starts(slug, on == "yes"))
+    @app.post("/projects/{slug}/wake")
+    def wake(slug: str):
+        return pipeline_action(slug, lambda flow: flow.wake_now(slug))
 
     @app.post("/projects/{slug}/budget")
     def set_budget(slug: str, amount: str = Form("")):

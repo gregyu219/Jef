@@ -1,4 +1,6 @@
+import argparse
 import json
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,7 +9,8 @@ from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Chats, ChatError, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus
-from jef.pipeline import Heartbeat, Phase, Pipeline, PipelineError, parse_pr, parse_status, parse_tasks
+from jef import coordinate, inbox
+from jef.pipeline import Heartbeat, Phase, Pipeline, PipelineError, last_reply, parse_pr, pr_label
 from jef.publish import PublishError
 from jef.projects import goal_fields, slugify, start_project
 from jef.status import read_status, status_path
@@ -114,20 +117,74 @@ class World:
     def agent(self, name):
         return next(a for a in load_roster(self.ws, self.slug) if a.name == name)
 
+    def ask(self, command, sender="ada", **args):
+        """The coordinator runs `jef project <command>`; Jef carries it out."""
+        request_id = inbox.submit(self.ws, self.slug, sender, command, args)
+        self.pipeline.process_inbox(self.slug)
+        return inbox.wait_for_answer(self.ws, self.slug, request_id, 0)
+
+    def ok(self, command, **args):
+        answer = self.ask(command, **args)
+        assert answer["ok"], answer["message"]
+        return answer["message"]
+
+    def refused(self, command, **args):
+        answer = self.ask(command, **args)
+        assert not answer["ok"], answer["message"]
+        return answer["message"]
+
+    def wakes(self):
+        """Messages Jef sent Ada, newest last."""
+        return [line.text for line in self.chats.transcript(self.slug, "ada") if line.kind == "sent" and line.text.startswith("heartbeat:")]
+
 
 @pytest.fixture
 def w(tmp_path):
     return World(tmp_path)
 
 
+PR20 = "https://github.com/gregyu219/Jef/pull/20"
+PR21 = "https://github.com/gregyu219/Jef/pull/21"
+
+
+def flag(cmd, name):
+    return cmd[cmd.index(name) + 1] if name in cmd else None
+
+
+def research_done(w):
+    """Ada has started research, and the research agent has finished."""
+    w.reply("ada", "hi")
+    w.ok("research")
+    w.reply("research", "# Research\n\nAdd it to base.html.")
+    assert w.pipeline.phase(w.slug) is Phase.PLANNING
+
+
+def tasks_waiting(w, titles=("A", "B")):
+    research_done(w)
+    w.ok("plan", titles=list(titles))
+    w.reply("ada", "Here's the plan.")
+    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
+
+
+def building(w, titles=("A", "B")):
+    tasks_waiting(w, titles)
+    w.pipeline.approve_tasks(w.slug)
+    w.pipeline.tick(w.slug)  # Ada hears about it
+    w.ok("start", number="1")
+    w.reply("ada", "Started task 1.")
+
+
+def pr_open(w, titles=("A", "B")):
+    building(w, titles)
+    w.reply("impl-1", READY)  # Ada is woken to read it
+    w.ok("publish", number="1")
+    w.reply("ada", "Opened the PR.")
+
+
 def test_parsers():
-    assert parse_tasks("Plan:\n```tasks\n1. One\n2) Two\nnot a task\n```") == ["One", "Two"]
-    assert parse_tasks("no block") == []
-    assert parse_status("Done.\nSTATUS: pr-opened https://github.com/a/b/pull/3") == ("pr-opened", "https://github.com/a/b/pull/3")
-    assert parse_status("hmm") is None
-    assert parse_status("x\nSTATUS: ready") == ("ready", "")
     assert parse_pr("```pr\nTitle: T\n\nBody here\n```") == ("T", "Body here")
     assert parse_pr("no block") is None
+    assert pr_label(PR20) == "PR #20" and pr_label("nope") == "the PR"
 
 
 def test_project_names_are_short_whole_words():
@@ -140,164 +197,241 @@ def test_from_go_to_done(w):
     p, slug = w.pipeline, w.slug
     assert p.phase(slug) is Phase.UNDERSTANDING
     w.reply("ada", "I understand. Questions? None. Say go.")
-    assert p.phase(slug) is Phase.UNDERSTANDING  # nothing starts without you
+    assert w.wakes() == []  # nothing happens without you
 
-    # You say go; Ada confirms with the marker, and a research agent starts.
+    # You say go; Ada starts research herself.
     w.chats.send(slug, "ada", "go")
-    w.reply("ada", "Starting research now.\nACTION: start-research")
+    assert "research agent has started" in w.ok("research", brief="Look at base.html")
     assert p.phase(slug) is Phase.RESEARCH
     research = w.agent("research")
     assert (research.role, research.parent) == (Role.RESEARCH, "ada")
-    assert "go" in w.last_message("research")  # it sees your conversation with Ada
+    assert "Look at base.html" in w.last_message("research") and "go" in w.last_message("research")
+    w.reply("ada", "Research is running.")
 
-    # Research comes back; Jef saves it and asks Ada for tasks.
+    # Research comes back: Jef saves it and wakes Ada straight away.
     w.reply("research", "# Research: footer\n\n## Summary\nAdd it to base.html.")
     assert "## Summary" in (w.ws.project_dir(slug) / "research.md").read_text()
-    assert "Add it to base.html" in w.last_message("ada")
-    assert goal_fields(w.ws, slug)["planning requested"] == "yes"
+    assert "research agent finished" in w.last_message("ada")
+    assert "## Project status" in w.last_message("ada")
 
-    # Ada proposes tasks; they wait for your approval.
-    w.reply("ada", "Here's the plan.\n```tasks\n1. Show the version in the footer\n2. Add a test\n```")
+    # Ada plans. The list waits for you; Ada can't approve it straight away.
+    assert "waits for the person's approval" in w.ok("plan", titles=["Show the version in the footer", "Add a test"])
     assert p.phase(slug) is Phase.APPROVAL
-    assert [t.title for t in p.tasks(slug).tasks] == ["Show the version in the footer", "Add a test"]
-    assert "impl-1" not in w.procs
+    assert "wait one heartbeat" in w.refused("approve")
+    w.reply("ada", "Here's the plan.")
 
-    # You approve: task 1 starts on its own branch. Task 2 waits its turn.
+    # You approve: Ada hears, and starts task 1. Task 2 has to wait.
     p.approve_tasks(slug)
-    assert p.phase(slug) is Phase.BUILDING
+    assert p.phase(slug) is Phase.BUILDING and "impl-1" not in w.procs
+    p.tick(slug)
+    assert "The person approved the tasks" in w.last_message("ada")
+    w.ok("start", number="1")
     assert w.git.worktrees == [(f"jef/{slug}/task-1", "main")]
-    tasks = p.tasks(slug).tasks
-    assert (tasks[0].status, tasks[0].agent) == (TaskStatus.IMPLEMENTATION, "impl-1")
-    assert tasks[1].status is TaskStatus.NOT_STARTED
     impl = w.agent("impl-1")
-    assert impl.folder.endswith("work/impl-1") and impl.parent == "ada"
-    assert "STATUS: ready" in w.last_message("impl-1") and "Don't push" in w.last_message("impl-1")
+    assert impl.folder.endswith("work/impl-1") and impl.parent == "ada" and impl.note == "Started by Ada"
+    assert "Your coordinator is Ada" in w.last_message("impl-1")
+    assert "Task 1 isn't merged yet" in w.refused("start", number="2")
+    w.reply("ada", "Task 1 is underway.")
 
-    # Still working: the heartbeat nudges it once the interval has passed.
-    w.reply("impl-1", "Edited the template.\nSTATUS: working tests next")
-    assert w.agent("impl-1").note == "Working: tests next"
-    count = len(w.procs["impl-1"])
-    w.clock += 30 * 60
-    p.tick(slug)
-    assert len(w.procs["impl-1"]) == count  # not yet
-    w.clock += 31 * 60
-    p.tick(slug)
-    assert "Heartbeat check-in" in w.last_message("impl-1")
-
-    # Ready: Jef pushes the branch and opens the PR itself. Then it's merged: task 2 starts.
-    url = "https://github.com/gregyu219/Jef/pull/20"
+    # impl-1 finishes: Ada is woken, reads it, and has Jef open the PR.
     w.reply("impl-1", READY)
+    assert "impl-1 finished a turn" in w.last_message("ada")
+    assert "## What this does" in last_reply(w.ws, slug, "impl-1")
+    assert w.ok("publish", number="1") == f"Opened PR #20: {PR20}"
     assert w.publisher.calls[0][:3] == (f"jef/{slug}/task-1", "main", "Show the version")
-    assert "## What this does" in w.publisher.calls[0][3]
-    assert p.tasks(slug).tasks[0].status is TaskStatus.PENDING_REVIEW
-    assert p.tasks(slug).tasks[0].pr == url
-    assert "impl-2" not in w.procs  # one at a time
-    assert w.agent("impl-1").note.startswith("PR opened")
-    w.pr_states[url] = "MERGED"
-    w.clock += 301
-    p.tick(slug)
-    tasks = p.tasks(slug).tasks
-    assert tasks[0].status is TaskStatus.MERGED
-    assert w.agent("impl-1").status is Status.STOPPED
-    # Ada, not Jef, decides when task 2 starts.
-    assert tasks[1].status is TaskStatus.NOT_STARTED
-    assert "PR #20" in w.last_message("ada") and "ACTION: start-task" in w.last_message("ada")
-    w.reply("ada", "Task 2 still makes sense.\nACTION: start-task 2")
-    assert p.tasks(slug).tasks[1].status is TaskStatus.IMPLEMENTATION
-    assert w.agent("impl-2").note == "Started by Ada after PR #20 merged"
-    assert w.agent("ada").note == "Started task 2"
+    task = p.tasks(slug).tasks[0]
+    assert (task.status, task.pr) == (TaskStatus.PENDING_REVIEW, PR20)
+    w.reply("ada", "PR is open.")
 
-    # Last PR merged: the project and its backlog item are done, agents stopped.
-    url2 = "https://github.com/gregyu219/Jef/pull/21"
-    w.reply("impl-2", READY)
-    w.pr_states[url2] = "MERGED"
-    w.clock += 301
+    # An hour later the heartbeat wakes Ada, who checks the PR on GitHub.
+    turns = len(w.procs["ada"])
+    w.clock += 59 * 60
     p.tick(slug)
+    assert len(w.procs["ada"]) == turns
+    w.clock += 2 * 60
+    p.tick(slug)
+    assert w.last_message("ada").startswith("Heartbeat:")
+    assert "can merge" in w.ok("prs")
+    w.pr_states[PR20] = "MERGED"
+    assert "merged" in w.ok("prs")
+    assert p.tasks(slug).tasks[0].status is TaskStatus.MERGED
+    assert w.agent("impl-1").status is Status.STOPPED
+    w.ok("start", number="2")
+    assert w.agent("impl-2").note == "Started by Ada after PR #20 merged"
+    w.reply("ada", "Started task 2.")
+
+    # The last PR merges: the project and its backlog item are done.
+    w.reply("impl-2", READY)
+    w.ok("publish", number="2")
+    w.pr_states[PR21] = "MERGED"
+    assert "the project is done" in w.ok("prs")
     assert p.phase(slug) is Phase.DONE
     assert Backlog.load(w.ws.backlog_file).items[0].status is BacklogStatus.DONE
+    w.reply("ada", "All done!")
     assert all(a.status is Status.STOPPED for a in load_roster(w.ws, slug))
 
 
-def test_replies_are_acted_on_once(w):
-    w.reply("ada", "ACTION: start-research")
-    w.pipeline.tick(w.slug)
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["research"]) == 1
-    assert w.agent("ada").handled == 1
-
-
-def test_the_research_marker_only_counts_while_understanding(w):
-    w.pipeline.start_research(w.slug)
-    w.reply("ada", "ACTION: start-research")
-    assert len(w.procs["research"]) == 1
-    with pytest.raises(PipelineError):
-        w.pipeline.start_research(w.slug)
-
-
-def test_planning_waits_until_the_coordinator_is_free(w):
-    w.pipeline.start_research(w.slug)  # Ada is still on her first turn
-    w.reply("research", "# Research\nfindings")
-    assert goal_fields(w.ws, w.slug).get("planning requested") != "yes"
-    w.reply("ada", "Hello!")
-    assert goal_fields(w.ws, w.slug)["planning requested"] == "yes"
-    assert "findings" in w.last_message("ada")
-
-
-def test_tasks_can_be_revised_before_approval_but_not_after(w):
-    w.pipeline.start_research(w.slug)
+def test_only_the_coordinator_can_ask(w):
     w.reply("ada", "hi")
-    w.reply("research", "findings")
-    w.reply("ada", "```tasks\n1. A\n```")
-    w.chats.send(w.slug, "ada", "split it in two")
-    w.reply("ada", "```tasks\n1. A1\n2. A2\n```")
-    assert [t.title for t in w.pipeline.tasks(w.slug).tasks] == ["A1", "A2"]
-    w.pipeline.approve_tasks(w.slug)
-    w.chats.send(w.slug, "ada", "change it again")
-    w.reply("ada", "```tasks\n1. Something else\n```")
-    assert [t.title for t in w.pipeline.tasks(w.slug).tasks] == ["A1", "A2"]
+    for sender in ("research", "impl-1", "someone"):
+        assert "Only the project's coordinator" in w.ask("research", sender=sender)["message"]
+    assert w.pipeline.phase(w.slug) is Phase.UNDERSTANDING
+    assert "doesn't know the request" in w.refused("merge")
 
 
-def test_stuck_implementers_are_not_nudged_and_errors_are_shown(w):
-    w.pipeline.start_research(w.slug)
+def test_requests_are_answered_once_and_in_order(w):
     w.reply("ada", "hi")
-    w.reply("research", "findings")
-    w.reply("ada", "```tasks\n1. A\n```")
-    w.pipeline.approve_tasks(w.slug)
-    w.reply("impl-1", "STATUS: stuck which colour should it be?")
-    assert w.agent("impl-1").note == "Stuck: which colour should it be?"
-    count = len(w.procs["impl-1"])
-    w.clock += 2 * 3600
+    first = inbox.submit(w.ws, w.slug, "ada", "research", {})
+    second = inbox.submit(w.ws, w.slug, "ada", "research", {})
+    assert w.pipeline.process_inbox(w.slug) == 2
+    assert w.pipeline.process_inbox(w.slug) == 0
+    assert inbox.wait_for_answer(w.ws, w.slug, first, 0)["ok"]
+    assert "already started" in inbox.wait_for_answer(w.ws, w.slug, second, 0)["message"]
+
+
+def test_ada_is_woken_once_per_finished_turn_and_never_while_busy(w):
+    building(w)
+    w.chats.send(w.slug, "ada", "how's it going?")  # Ada is busy talking to you
+    w.reply("impl-1", "Halfway.\nSTATUS: working tests next")
+    assert w.last_message("ada") == "how's it going?"  # not woken mid-turn
+    w.reply("ada", "Fine.")  # once Ada is free, she hears about impl-1
+    assert "impl-1 finished a turn" in w.last_message("ada")
+    turns = len(w.procs["ada"])
+    w.procs["ada"][-1].done = True
     w.pipeline.tick(w.slug)
-    assert len(w.procs["impl-1"]) == count
+    assert len(w.procs["ada"]) == turns  # only once
 
 
-def test_a_git_failure_becomes_a_problem_you_can_retry(w):
-    w.pipeline.start_research(w.slug)
+def test_no_heartbeat_while_understanding_or_waiting_for_you(w):
     w.reply("ada", "hi")
-    w.reply("research", "findings")
-    w.reply("ada", "```tasks\n1. A\n```")
-    w.git.fail = "git fetch failed: network down"
-    w.pipeline.approve_tasks(w.slug)
-    assert "network down" in w.pipeline.problem(w.slug)
-    assert "impl-1" not in w.procs
-    w.pipeline.tick(w.slug)  # doesn't keep retrying by itself
-    assert "impl-1" not in w.procs
-    w.git.fail = None
+    w.clock += 10 * 3600
+    w.pipeline.tick(w.slug)
+    assert w.wakes() == []
+    building(w)
+    w.ok("wait", reason="which colour?")
+    w.reply("ada", "Asked.")
+    turns = len(w.procs["ada"])
+    w.clock += 10 * 3600
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns
+
+
+def test_wait_shows_on_the_page_and_try_again_tells_ada(w):
+    building(w)
+    assert "waiting" in w.ok("wait", reason="Should B use the new API?")
+    assert w.pipeline.problem(w.slug) == "Ada is waiting for you: Should B use the new API?"
+    w.reply("ada", "I asked.")
     w.pipeline.clear_problem(w.slug)
+    assert "pressed Try again on: Ada is waiting for you" in w.last_message("ada")
+
+
+def test_starting_a_task_lifts_a_wait(w):
+    pr_open(w)
+    w.pr_states[PR20] = "MERGED"
+    w.ok("prs")
+    w.ok("wait", reason="check B first")
+    w.ok("start", number="2")
     assert w.pipeline.problem(w.slug) == ""
-    assert "impl-1" in w.procs
 
 
-def test_heartbeat_interval_is_per_project(w):
-    assert w.pipeline.heartbeat_minutes(w.slug) == 60
-    w.pipeline.set_heartbeat_minutes(w.slug, 15)
-    assert w.pipeline.heartbeat_minutes(w.slug) == 15
-    with pytest.raises(PipelineError):
-        w.pipeline.set_heartbeat_minutes(w.slug, 1)
+def test_the_coordinator_approves_after_a_heartbeat_if_allowed(w):
+    tasks_waiting(w)
+    assert "wait one heartbeat" in w.refused("approve")
+    w.clock += 61 * 60
+    w.pipeline.tick(w.slug)
+    assert w.last_message("ada").startswith("Heartbeat:")  # it's asked to look at the list
+    w.pipeline.set_coordinator_decides(w.slug, False)
+    assert "turned off coordinator approval" in w.refused("approve")
+    w.pipeline.set_coordinator_decides(w.slug, True)
+    w.ok("approve")
+    assert w.pipeline.phase(w.slug) is Phase.BUILDING
 
 
-def flag(cmd, name):
-    return cmd[cmd.index(name) + 1] if name in cmd else None
+def test_no_approval_heartbeat_when_its_turned_off(w):
+    tasks_waiting(w)
+    w.pipeline.set_coordinator_decides(w.slug, False)
+    turns = len(w.procs["ada"])
+    w.clock += 3 * 3600
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns
+
+
+def test_plans_can_change_until_building_and_then_only_what_has_not_started(w):
+    research_done(w)
+    w.ok("plan", titles=["A"])
+    w.ok("plan", titles=["A1", "A2"])
+    assert [t.title for t in w.pipeline.tasks(w.slug).tasks] == ["A1", "A2"]
+    w.pipeline.approve_tasks(w.slug)
+    w.ok("start", number="1")
+    w.ok("plan", titles=["B, reworded", "C"])
+    tasks = w.pipeline.tasks(w.slug).tasks
+    assert [(t.number, t.title, t.status) for t in tasks] == [
+        (1, "A1", TaskStatus.IMPLEMENTATION), (2, "B, reworded", TaskStatus.NOT_STARTED), (3, "C", TaskStatus.NOT_STARTED),
+    ]
+    w.ok("plan", titles=[])  # drop the rest
+    assert [t.number for t in w.pipeline.tasks(w.slug).tasks] == [1]
+
+
+def test_bad_requests_are_refused_plainly(w):
+    w.reply("ada", "hi")
+    assert "nothing to plan from" in w.refused("plan", titles=["A"])
+    assert "haven't been approved" in w.refused("start", number="1")
+    assert "isn't one of your agents" in w.refused("send", agent="nobody", message="hi")
+    building(w)
+    assert "Give the task's number" in w.refused("start", number="two")
+    assert "no task 9" in w.refused("start", number="9")
+    assert "already started" in w.refused("start", number="1")
+    assert "still working" in w.refused("publish", number="1")
+    assert "still working on its last message" in w.refused("send", agent="impl-1", message="faster")
+    assert "isn't one of your agents" in w.refused("stop", agent="ada")
+
+
+def test_ada_nudges_and_stops_her_agents(w):
+    building(w)
+    w.reply("impl-1", "Halfway.\nSTATUS: working")
+    w.ok("send", agent="impl-1", message="Carry on with the tests, please.")
+    assert w.last_message("impl-1") == "Carry on with the tests, please."
+    assert any(line.text == "Ada: Carry on with the tests, please." for line in w.chats.transcript(w.slug, "impl-1"))
+    w.ok("stop", agent="impl-1")
+    assert w.agent("impl-1").status is Status.STOPPED
+
+
+def test_publish_needs_a_pr_block_and_passes_on_problems(w):
+    building(w)
+    w.reply("impl-1", "Done.\nSTATUS: ready")
+    assert "hasn't written a ```pr block" in w.refused("publish", number="1")
+    w.ok("send", agent="impl-1", message="Add the pr block")
+    w.reply("impl-1", READY)
+    w.publisher.fail = "There are uncommitted changes."
+    assert w.refused("publish", number="1") == "There are uncommitted changes."
+    w.publisher.fail = None
+    w.ok("publish", number="1")
+    assert w.agent("impl-1").note == "PR opened, waiting for your review"
+
+
+def test_a_conflict_is_reported_and_the_fix_goes_to_the_same_pr(w):
+    pr_open(w)
+    w.mergeable[PR20] = "CONFLICTING"
+    assert "has merge conflicts" in w.ok("prs")
+    w.ok("send", agent="impl-1", message="Rebase on main and fix the conflicts.")
+    w.reply("impl-1", READY)
+    said = w.ok("publish", number="1", note="Rebased on main to fix merge conflicts.")
+    assert said.startswith(f"Updated PR #20: {PR20}") and "left your note" in said
+    assert w.publisher.comments == [(PR20, "Jef: Rebased on main to fix merge conflicts.")]
+    assert w.agent("impl-1").note == "PR updated, waiting for your review"
+    w.mergeable[PR20] = "UNKNOWN"
+    assert "still working out" in w.ok("prs")
+
+
+def test_a_new_pr_links_the_closed_one(w):
+    pr_open(w)
+    w.pr_states[PR20] = "CLOSED"
+    assert "closed without merging" in w.ok("prs")
+    w.publisher.open.clear()  # GitHub has no open PR for the branch any more
+    w.ok("send", agent="impl-1", message="The PR was closed; let's open it again")
+    w.reply("impl-1", READY)
+    assert w.ok("publish", number="1") == f"Opened PR #21: {PR21}"
+    assert w.publisher.calls[-1][3].startswith(f"Replaces {PR20}, which was closed without merging.")
 
 
 def test_a_spent_budget_pauses_the_project_until_you_raise_it(w):
@@ -306,12 +440,12 @@ def test_a_spent_budget_pauses_the_project_until_you_raise_it(w):
     assert flag(w.procs["ada"][0].cmd, "--max-budget-usd") is None  # no budget, no cap
     p.set_budget_usd(slug, 1)
     assert goal_fields(w.ws, slug)["budget"] == "1.00 USD"
-    p.start_research(slug)
-    assert flag(w.procs["research"][0].cmd, "--max-budget-usd") == "1.00"
     w.reply("ada", "hi", cost=0.4)
+    w.ok("research")
+    assert flag(w.procs["research"][0].cmd, "--max-budget-usd") == "0.60"
     w.reply("research", "findings", cost=0.7)  # $1.10 of $1.00
 
-    # Paused: the reply waits, no planning turn starts, and you can't message Ada.
+    # Paused: the findings wait, Ada isn't woken, and you can't message her.
     assert p.problem(slug).startswith("Budget reached: $1.10 of $1.00 used")
     assert not (w.ws.project_dir(slug) / "research.md").exists()
     ada_turns = len(w.procs["ada"])
@@ -338,35 +472,118 @@ def test_a_spent_budget_pauses_the_project_until_you_raise_it(w):
             p.set_budget_usd(slug, bad)
 
 
-def test_a_turn_cut_off_by_the_budget_says_so(w):
-    approved_with_one_task(w)
-    w.pipeline.set_budget_usd(w.slug, 2)
-    w.reply("impl-1", "", is_error=True, cost=2.05, subtype="error_max_budget_usd")
-    assert w.pipeline.problem(w.slug).startswith("Budget reached")
-    # The reply is read once the budget is raised; it says why the turn stopped.
-    w.pipeline.set_budget_usd(w.slug, 10)
-    w.pipeline.tick(w.slug)
-    assert w.agent("impl-1").note == "Last turn stopped partway: it reached the project budget"
-    assert any("project's budget" in line.text for line in w.chats.transcript(w.slug, "impl-1"))
+def test_heartbeat_interval_is_per_project(w):
+    w.pipeline.set_heartbeat_minutes(w.slug, 15)
+    assert w.pipeline.heartbeat_minutes(w.slug) == 15
+    assert goal_fields(w.ws, w.slug)["heartbeat"] == "15 minutes"
+    with pytest.raises(PipelineError):
+        w.pipeline.set_heartbeat_minutes(w.slug, 1)
+
+
+def test_coordinators_get_jef_commands_and_nobody_else_does(w):
+    ada = w.procs["ada"][0]
+    assert ada.kwargs["env"]["JEF_PROJECT"] == w.slug and ada.kwargs["env"]["JEF_AGENT"] == "ada"
+    assert "Bash(jef project *)" in ada.cmd
+    assert "jef project start" in flag(ada.cmd, "--append-system-prompt")
+    building(w)
+    impl = w.procs["impl-1"][0]
+    assert "JEF_PROJECT" not in impl.kwargs["env"] and "JEF_AGENT" not in impl.kwargs["env"]
+    assert "Bash(jef project *)" not in impl.cmd and "Bash(jef *)" in impl.cmd[impl.cmd.index("--disallowedTools"):]
+    # Every turn carries the role's instructions, not just the first.
+    assert "jef project start" in flag(w.procs["ada"][-1].cmd, "--append-system-prompt")
+    assert "--resume" in w.procs["ada"][-1].cmd
+
+
+# ---- jef project, the command coordinators run
+
+
+def parse(*argv):
+    from jef.cli import build_parser
+
+    return build_parser().parse_args(["project", *argv])
+
+
+def coordinator_env(w):
+    return {"JEF_PROJECT": w.slug, "JEF_AGENT": "ada"}
+
+
+def test_jef_project_only_works_in_a_coordinators_turn(w, capsys):
+    assert coordinate.run(parse("status"), ws=w.ws, env={}) == 2
+    assert coordinate.run(parse("status"), ws=w.ws, env={"JEF_PROJECT": w.slug, "JEF_AGENT": "impl-1"}) == 2
+    assert "only works inside a coordinator's turn" in capsys.readouterr().out
+
+
+def test_jef_project_reads_without_jef_running(w, capsys):
+    assert coordinate.run(parse("status"), ws=w.ws, env=coordinator_env(w)) == 0
+    assert "- Phase: Understanding" in capsys.readouterr().out
+    assert coordinate.run(parse("read", "ada"), ws=w.ws, env=coordinator_env(w)) == 0
+    assert "still working on its first turn" in capsys.readouterr().out
+    assert coordinate.run(parse("read", "nobody"), ws=w.ws, env=coordinator_env(w)) == 1
+    # Changing things needs the running Jef.
+    assert coordinate.run(parse("research"), ws=w.ws, env=coordinator_env(w)) == 1
+    assert "Jef isn't running" in capsys.readouterr().out
+
+
+def test_jef_project_round_trip_through_the_running_jef(w, capsys):
+    w.reply("ada", "hi")
+    inbox.mark_alive(w.ws)
+    stop = threading.Event()
+
+    def jef():  # the running Jef's inbox loop
+        while not stop.is_set():
+            w.pipeline.process_inbox(w.slug)
+            stop.wait(0.05)
+
+    thread = threading.Thread(target=jef)
+    thread.start()
+    try:
+        code = coordinate.run(parse("research", "look", "at", "base.html"), ws=w.ws, env=coordinator_env(w), wait_seconds=5)
+        assert code == 0 and "research agent has started" in capsys.readouterr().out
+        assert "look at base.html" in w.last_message("research")
+        code = coordinate.run(parse("send", "impl-9", "hello"), ws=w.ws, env=coordinator_env(w), wait_seconds=5)
+        assert code == 1 and "isn't one of your agents" in capsys.readouterr().out
+    finally:
+        stop.set()
+        thread.join()
+
+
+def test_request_args():
+    assert coordinate.request_args(parse("plan", "A", "B")) == ("plan", {"titles": ["A", "B"]})
+    assert coordinate.request_args(parse("publish", "2", "--note", "rebased")) == ("publish", {"number": "2", "note": "rebased"})
+    assert coordinate.request_args(parse("send", "impl-2", "carry", "on")) == ("send", {"agent": "impl-2", "message": "carry on"})
+    assert coordinate.request_args(parse("wait", "need", "an", "answer")) == ("wait", {"reason": "need an answer"})
+    assert coordinate.request_args(parse("prs")) == ("prs", {})
+
+
+# ---- the web page
+
+
+def client(w):
+    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
+                     chats=w.chats, pipeline=w.pipeline)
+    return TestClient(app)
 
 
 def test_web_buttons(w):
-    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
-                     chats=w.chats, pipeline=w.pipeline)
-    c = TestClient(app)
+    c = client(w)
     page = c.get(f"/projects/{w.slug}").text
     assert "Start research" in page
     w.procs["ada"][-1].done = True
     c.post(f"/projects/{w.slug}/research")
     assert w.pipeline.phase(w.slug) is Phase.RESEARCH
-    again = c.post(f"/projects/{w.slug}/research").text
-    assert "already started" in again
+    assert "already started" in c.post(f"/projects/{w.slug}/research").text
+    w.pipeline.tick(w.slug)
+    assert "pressed Start research" in w.last_message("ada")
+    w.reply("ada", "ok")
     w.reply("research", "# Research\nfindings here")
-    w.reply("ada", "```tasks\n1. Show the version\n```")
+    w.ok("plan", titles=["Show the version"])
+    w.reply("ada", "plan sent")
     page = c.get(f"/projects/{w.slug}").text
     assert "Approve tasks and start building" in page and "findings here" in page
     c.post(f"/projects/{w.slug}/approve")
-    assert "impl-1" in w.procs
+    assert w.pipeline.phase(w.slug) is Phase.BUILDING
+    w.pipeline.tick(w.slug)
+    w.ok("start", number="1")
     assert "/agents/impl-1" in c.get(f"/projects/{w.slug}").text
     assert "Show the version" in c.get(f"/projects/{w.slug}/agents/impl-1").text
     c.post(f"/projects/{w.slug}/heartbeat", data={"minutes": "30"})
@@ -374,219 +591,18 @@ def test_web_buttons(w):
     assert "between 5 minutes" in c.post(f"/projects/{w.slug}/heartbeat", data={"minutes": "2"}).text
 
 
-def test_web_budget_form(w):
-    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
-                     chats=w.chats, pipeline=w.pipeline)
-    c = TestClient(app)
-    assert "No budget" in c.get(f"/projects/{w.slug}").text
-    c.post(f"/projects/{w.slug}/budget", data={"amount": "$12.50"})
-    assert w.pipeline.budget_usd(w.slug) == 12.5
-    w.reply("ada", "hi", cost=2.5)
+def test_web_wake_button(w):
+    c = client(w)
+    building(w)
     page = c.get(f"/projects/{w.slug}").text
-    assert "Budget $12.50 · $10.00 left" in page and 'value="12.50"' in page
-    assert "Type a dollar amount" in c.post(f"/projects/{w.slug}/budget", data={"amount": "lots"}).text
-    assert "above $0" in c.post(f"/projects/{w.slug}/budget", data={"amount": "0"}).text
-
-    # Spent: messages to the coordinator are refused, with a clear reason.
-    c.post(f"/projects/{w.slug}/budget", data={"amount": "2"})
-    page = c.post(f"/projects/{w.slug}/message", data={"message": "hello"}).text
-    assert "budget is used up" in page and "Budget reached" in page
-    c.post(f"/projects/{w.slug}/budget", data={"amount": ""})
-    assert w.pipeline.budget_usd(w.slug) is None
-
-
-def approved_with_one_task(w):
-    w.pipeline.start_research(w.slug)
-    w.reply("ada", "hi")
-    w.reply("research", "findings")
-    w.reply("ada", "```tasks\n1. A\n```")
-    w.pipeline.approve_tasks(w.slug)
-
-
-def tasks_waiting(w, block="```tasks\n1. A\n2. B\n```"):
-    w.pipeline.start_research(w.slug)
-    w.reply("ada", "hi")
-    w.reply("research", "findings")
-    w.reply("ada", block)
-    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
-
-
-def test_the_coordinator_is_asked_to_decide_once_per_heartbeat(w):
-    tasks_waiting(w)
-    turns = len(w.procs["ada"])
-    w.clock += 59 * 60
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns  # you get a full interval to approve by hand
-    w.clock += 60
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns + 1
-    message = w.last_message("ada")
-    assert "waited about 60 minutes" in message and "ACTION: approve-tasks" in message
-    assert "1. A\n2. B" in message
-    w.reply("ada", "I'd like to hear from the person first. Is B needed?")
-    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
-    w.clock += 30 * 60
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns + 1  # not again until the next interval
-    w.clock += 30 * 60
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns + 2
-
-
-def test_the_coordinator_approves_with_the_marker(w):
-    tasks_waiting(w)
-    w.clock += 3600
-    w.pipeline.tick(w.slug)
-    w.reply("ada", "The list covers the request.\nACTION: approve-tasks")
-    assert w.pipeline.phase(w.slug) is Phase.BUILDING
-    assert "impl-1" in w.procs
-    assert w.agent("ada").note == "Approved the tasks"
-
-
-def test_a_new_list_and_the_marker_in_one_reply_does_not_approve(w):
-    tasks_waiting(w, "```tasks\n1. A\n```\nACTION: approve-tasks")
-    assert "impl-1" not in w.procs
-    # A revised list with the marker while waiting is saved but not approved either.
-    w.reply("ada", "```tasks\n1. A1\n```\nACTION: approve-tasks")
-    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
-    assert [t.title for t in w.pipeline.tasks(w.slug).tasks] == ["A1"]
-
-
-def test_a_revised_list_restarts_the_wait(w):
-    tasks_waiting(w)
-    turns = len(w.procs["ada"])
-    w.clock += 40 * 60
-    w.chats.send(w.slug, "ada", "drop B")
-    w.reply("ada", "```tasks\n1. A\n```")
-    w.clock += 40 * 60
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns + 1  # only your message, no heartbeat yet
-    w.clock += 20 * 60
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns + 2
-    assert "Heartbeat" in w.last_message("ada")
-
-
-def test_a_busy_coordinator_is_not_asked_to_decide(w):
-    tasks_waiting(w)
-    w.chats.send(w.slug, "ada", "what about tests?")
-    turns = len(w.procs["ada"])
-    w.clock += 3600
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns  # still answering you
-    w.reply("ada", "Task 2 adds them.")
-    assert len(w.procs["ada"]) == turns + 1
-    assert "Heartbeat" in w.last_message("ada")
-
-
-def test_heartbeat_approval_can_be_turned_off(w):
-    assert w.pipeline.coordinator_decides(w.slug)  # on by default
-    tasks_waiting(w)
-    w.pipeline.set_coordinator_decides(w.slug, False)
-    assert goal_fields(w.ws, w.slug)["coordinator decides"] == "no"
-    turns = len(w.procs["ada"])
-    w.clock += 3 * 3600
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns  # never asked
-    # Even if it approves on its own, only you can while it's off.
-    w.chats.send(w.slug, "ada", "looks fine to me")
-    w.reply("ada", "Great.\nACTION: approve-tasks")
-    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
-    assert "turned off" in w.agent("ada").note
-    # Turning it back on waits a full interval before asking.
-    w.pipeline.set_coordinator_decides(w.slug, True)
-    turns = len(w.procs["ada"])
-    w.clock += 59 * 60
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns
-    w.clock += 60
-    w.pipeline.tick(w.slug)
-    assert "Heartbeat" in w.last_message("ada")
-    w.pipeline.approve_tasks(w.slug)  # the button still works either way
-    assert w.pipeline.phase(w.slug) is Phase.BUILDING
-
-
-def test_heartbeat_approval_toggle_on_the_page(w):
-    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
-                     chats=w.chats, pipeline=w.pipeline)
-    c = TestClient(app)
-    tasks_waiting(w)
-    page = c.get(f"/projects/{w.slug}").text
-    assert "will decide at the next heartbeat" in page and "Turn off" in page
-    c.post(f"/projects/{w.slug}/coordinator-decides", data={"on": "no"})
-    assert not w.pipeline.coordinator_decides(w.slug)
-    page = c.get(f"/projects/{w.slug}").text
-    assert "won't approve them for you" in page and "Turn on" in page
-    assert "Approve tasks and start building" in page
-    c.post(f"/projects/{w.slug}/coordinator-decides", data={"on": "yes"})
-    assert w.pipeline.coordinator_decides(w.slug)
-
-
-def test_check_now_does_not_ask_for_a_decision_early(w):
-    tasks_waiting(w)
-    turns = len(w.procs["ada"])
-    w.clock += 30 * 60
-    w.pipeline.check_now(w.slug)
-    assert len(w.procs["ada"]) == turns
-
-
-def test_check_now_notices_a_merge_straight_away_without_nudging(w):
-    w.pipeline.start_research(w.slug)
-    w.reply("ada", "hi")
-    w.reply("research", "findings")
-    w.reply("ada", "```tasks\n1. A\n2. B\n```")
-    w.pipeline.approve_tasks(w.slug)
-    w.reply("impl-1", READY)  # this tick already checked GitHub, so the next waits five minutes
-    url = w.pipeline.tasks(w.slug).tasks[0].pr
-    w.pr_states[url] = "MERGED"
-    w.pipeline.tick(w.slug)
-    assert w.pipeline.tasks(w.slug).tasks[0].status is TaskStatus.PENDING_REVIEW
-    assert w.pipeline.last_checked(w.slug) is None
-
-    w.pipeline.check_now(w.slug)  # same clock: no waiting
-    tasks = w.pipeline.tasks(w.slug).tasks
-    assert tasks[0].status is TaskStatus.MERGED
-    assert "ACTION: start-task" in w.last_message("ada")  # Ada is asked straight away
-    w.reply("ada", "ACTION: start-task 2")
-    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.IMPLEMENTATION
-    assert w.pipeline.last_checked(w.slug) == w.clock
-
-    # impl-2 is working; pressing the button again doesn't nudge it.
-    turns = len(w.procs["impl-2"])
-    w.procs["impl-2"][-1].done = True
-    w.pipeline.check_now(w.slug)
-    assert len(w.procs["impl-2"]) == turns
-    assert "Heartbeat check-in" not in w.last_message("impl-2")
-
-
-def test_check_now_reads_a_ready_reply_and_checks_its_pr_in_one_go(w):
-    approved_with_one_task(w)
-    url = "https://github.com/gregyu219/Jef/pull/20"
-    w.pr_states[url] = "MERGED"
-    with w.chats.chat_file(w.slug, "impl-1").open("a") as f:
-        f.write(json.dumps({"type": "result", "is_error": False, "result": READY}) + "\n")
-    w.procs["impl-1"][-1].done = True
-    w.pipeline.check_now(w.slug)
-    assert w.pipeline.phase(w.slug) is Phase.DONE
-
-
-def test_check_now_refuses_finished_projects(w):
-    w.chats.stop(w.slug, "ada")
-    with pytest.raises(PipelineError):
-        w.pipeline.check_now(w.slug)
-
-
-def test_ago():
-    assert ago(5) == "just now"
-    assert ago(60) == "1 minute ago"
-    assert ago(150) == "2 minutes ago"
-    assert ago(2 * 3600 + 5) == "2 hours ago"
+    assert "Ask Ada to check now" in page
+    c.post(f"/projects/{w.slug}/wake")
+    assert "asked you to check on the project now" in w.last_message("ada")
+    assert "busy right now" in c.post(f"/projects/{w.slug}/wake").text
 
 
 def test_web_check_button(w):
-    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
-                     chats=w.chats, pipeline=w.pipeline)
-    c = TestClient(app)
+    c = client(w)
     page = c.get(f"/projects/{w.slug}").text
     assert "Check status now" in page and "Last checked" not in page
     response = c.post(f"/projects/{w.slug}/check", follow_redirects=False)
@@ -598,35 +614,39 @@ def test_web_check_button(w):
     assert "nothing to check" in c.post(f"/projects/{w.slug}/check").text
 
 
-def test_publish_problems_go_back_to_the_agent_a_few_times(w):
-    approved_with_one_task(w)
-    w.publisher.fail = "There are uncommitted changes."
-    w.reply("impl-1", READY)
-    assert "Jef couldn't open your PR yet: There are uncommitted changes." in w.last_message("impl-1")
-    assert w.agent("impl-1").note.startswith("Couldn't open the PR (1)")
-    w.reply("impl-1", READY)
-    w.reply("impl-1", READY)
-    turns = len(w.procs["impl-1"])
-    w.reply("impl-1", READY)  # fourth failure: stop sending it back
-    assert len(w.procs["impl-1"]) == turns
-    assert w.agent("impl-1").note.startswith("Stuck: Jef couldn't open the PR")
-    assert w.pipeline.tasks(w.slug).tasks[0].status is TaskStatus.IMPLEMENTATION
+def test_check_now_costs_nothing_without_news(w):
+    building(w)
+    turns = len(w.procs["ada"])
+    w.clock += 30 * 60
+    w.pipeline.check_now(w.slug)
+    assert len(w.procs["ada"]) == turns
 
 
-def test_ready_without_a_pr_block_is_sent_back(w):
-    approved_with_one_task(w)
-    w.reply("impl-1", "All done.\nSTATUS: ready")
-    assert w.publisher.calls == []
-    assert "no ```pr block" in w.last_message("impl-1")
+def test_web_budget_form(w):
+    c = client(w)
+    assert "No budget" in c.get(f"/projects/{w.slug}").text
+    c.post(f"/projects/{w.slug}/budget", data={"amount": "$12.50"})
+    assert w.pipeline.budget_usd(w.slug) == 12.5
+    w.reply("ada", "hi", cost=2.5)
+    page = c.get(f"/projects/{w.slug}").text
+    assert "Budget $12.50 · $10.00 left" in page and 'value="12.50"' in page
+    assert "Type a dollar amount" in c.post(f"/projects/{w.slug}/budget", data={"amount": "lots"}).text
+    assert "above $0" in c.post(f"/projects/{w.slug}/budget", data={"amount": "0"}).text
+    c.post(f"/projects/{w.slug}/budget", data={"amount": "2"})
+    page = c.post(f"/projects/{w.slug}/message", data={"message": "hello"}).text
+    assert "budget is used up" in page and "Budget reached" in page
+    c.post(f"/projects/{w.slug}/budget", data={"amount": ""})
+    assert w.pipeline.budget_usd(w.slug) is None
 
 
-def test_ready_again_updates_the_open_pr(w):
-    approved_with_one_task(w)
-    w.reply("impl-1", READY)
-    w.chats.send(w.slug, "impl-1", "Please rename the variable")
-    w.reply("impl-1", "Renamed.\nSTATUS: ready")  # no block needed the second time
-    assert len(w.publisher.calls) == 2
-    assert w.agent("impl-1").note == "PR updated, waiting for your review"
+def test_ago():
+    assert ago(5) == "just now"
+    assert ago(60) == "1 minute ago"
+    assert ago(150) == "2 minutes ago"
+    assert ago(2 * 3600 + 5) == "2 hours ago"
+
+
+# ---- status.md
 
 
 def test_status_md_follows_the_project_through_every_phase(w):
@@ -637,242 +657,39 @@ def test_status_md_follows_the_project_through_every_phase(w):
         beat.tick_all()
         return read_status(w.ws, slug)["phase"]
 
-    # start_project writes the first one before any tick.
     assert read_status(w.ws, slug)["phase"] == "Understanding"
     assert read_status(w.ws, slug)["coordinator"] == "Ada (Working)"
-    w.reply("ada", "Starting.\nACTION: start-research")
+    w.reply("ada", "hi")
+    w.ok("research")
     assert phase() == "Research"
-    assert read_status(w.ws, slug)["coordinator note"] == "Started research"
     w.reply("research", "# Research\n\nFindings.")
     assert phase() == "Planning"
-    w.reply("ada", "```tasks\n1. Show it\n```")
+    w.ok("plan", titles=["Show it"])
     assert phase() == "Waiting for your approval"
     w.pipeline.approve_tasks(slug)
     assert read_status(w.ws, slug)["phase"] == "Building"  # written straight away
-    assert "| 1 | Show it | Implementation | impl-1 | Working | |" in status_path(w.ws, slug).read_text()
+    w.ok("start", number="1")
+    assert "| 1 | Show it | Implementation | impl-1 | Working | | Started by Ada |" in status_path(w.ws, slug).read_text()
     w.reply("impl-1", READY)
-    w.pr_states["https://github.com/gregyu219/Jef/pull/20"] = "MERGED"
-    w.clock += 301
+    w.ok("publish", number="1")
+    w.pr_states[PR20] = "MERGED"
+    w.ok("prs")
     assert phase() == "Done"
-    fields = read_status(w.ws, slug)
-    assert fields["tasks"] == "1 of 1 merged"
-    assert fields["coordinator"] == "Ada (Stopped)"
+    assert read_status(w.ws, slug)["tasks"] == "1 of 1 merged"
+    w.procs["ada"][-1].done = True
+    assert phase() == "Done"
+    assert read_status(w.ws, slug)["coordinator"] == "Ada (Stopped)"
 
 
 def test_a_stopped_project_still_gets_a_status(w):
     w.chats.stop(w.slug, "ada")
-    Heartbeat(w.pipeline).tick_all()  # tick skips Stopped projects; the status is still written
+    Heartbeat(w.pipeline).tick_all()
     assert read_status(w.ws, w.slug)["phase"] == "Stopped"
 
 
-def test_check_now_writes_the_status(w):
-    w.reply("ada", "ACTION: start-research")
-    status_path(w.ws, w.slug).unlink()
-    w.pipeline.check_now(w.slug)
-    assert read_status(w.ws, w.slug)["phase"] == "Research"
-
-
-# ---- the coordinator decides when the next task starts
-
-
-def first_task_merged(w, block="```tasks\n1. A\n2. B\n3. C\n```"):
-    tasks_waiting(w, block)
-    w.pipeline.approve_tasks(w.slug)
-    assert w.agent("impl-1").note == "Started by Jef when the tasks were approved"
-    w.reply("impl-1", READY)
-    w.pr_states["https://github.com/gregyu219/Jef/pull/20"] = "MERGED"
-    w.pipeline.check_now(w.slug)
-    assert w.pipeline.tasks(w.slug).tasks[0].status is TaskStatus.MERGED
-    assert "PR #20" in w.last_message("ada")
-
-
-def test_the_coordinator_can_revise_the_remaining_tasks_then_start_one(w):
-    first_task_merged(w)
-    w.reply("ada", "B isn't needed now.\n```tasks\n1. Ignored, already merged\n2. C, reworded\n```\nACTION: start-task 2")
-    tasks = w.pipeline.tasks(w.slug).tasks
-    assert [(t.number, t.title, t.status) for t in tasks] == [
-        (1, "A", TaskStatus.MERGED), (2, "C, reworded", TaskStatus.IMPLEMENTATION),
-    ]
-    assert "Revised the remaining tasks (1 left)" in w.agent("ada").note
-
-
-def test_a_task_list_without_the_start_marker_changes_nothing(w):
-    first_task_merged(w)
-    w.reply("ada", "Maybe:\n```tasks\n2. Something else\n```")
-    assert [t.title for t in w.pipeline.tasks(w.slug).tasks] == ["A", "B", "C"]
-
-
-def test_the_coordinator_can_wait_for_you(w):
-    first_task_merged(w)
-    w.reply("ada", "Should B use the new API?\nACTION: wait need to know whether B uses the new API")
-    assert "Ada is waiting for you: need to know whether B uses the new API" in w.pipeline.problem(w.slug)
-    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.NOT_STARTED
-    # You answer in the chat; Ada starts it, and the wait is over.
-    w.chats.send(w.slug, "ada", "yes, the new API")
-    w.reply("ada", "ACTION: start-task 2")
-    assert w.pipeline.problem(w.slug) == ""
-    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.IMPLEMENTATION
-
-
-def test_try_again_after_a_wait_asks_the_coordinator_again(w):
-    first_task_merged(w)
-    w.reply("ada", "ACTION: wait question")
-    turns = len(w.procs["ada"])
-    w.pipeline.clear_problem(w.slug)
-    assert len(w.procs["ada"]) == turns + 1 and "ACTION: start-task" in w.last_message("ada")
-
-
-def test_bad_start_requests_are_refused_with_a_note(w):
-    first_task_merged(w)
-    w.reply("ada", "ACTION: start-task 1")
-    assert "already Merged" in w.agent("ada").note
-    w.chats.send(w.slug, "ada", "hmm")
-    w.reply("ada", "ACTION: start-task 9")
-    assert "no task 9" in w.agent("ada").note
-    w.chats.send(w.slug, "ada", "hmm")
-    w.reply("ada", "ACTION: start-task 2")
-    w.chats.send(w.slug, "ada", "and 3?")
-    w.reply("ada", "ACTION: start-task 3")
-    assert "task 2 isn't merged yet" in w.agent("ada").note
-    assert w.pipeline.tasks(w.slug).tasks[2].status is TaskStatus.NOT_STARTED
-
-
-def test_no_answer_gets_one_reminder_then_a_problem(w):
-    first_task_merged(w)
-    w.reply("ada", "Let me think about it.")  # no marker
-    turns = len(w.procs["ada"])
-    w.clock += 59 * 60
-    w.pipeline.tick(w.slug)
-    assert len(w.procs["ada"]) == turns
-    w.clock += 60
-    w.pipeline.tick(w.slug)
-    assert "still waiting for you to say which task starts next" in w.last_message("ada")
-    w.reply("ada", "Still thinking.")
-    w.clock += 60 * 60
-    w.pipeline.tick(w.slug)
-    assert "hasn't said which task to start next" in w.pipeline.problem(w.slug)
-    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.NOT_STARTED  # never silently
-
-
-def test_turned_off_jef_starts_the_next_task_itself(w):
-    assert w.pipeline.coordinator_starts(w.slug)  # on by default
-    w.pipeline.set_coordinator_starts(w.slug, False)
-    assert goal_fields(w.ws, w.slug)["coordinator starts tasks"] == "no"
-    tasks_waiting(w)
-    w.pipeline.approve_tasks(w.slug)
-    w.reply("impl-1", READY)
-    w.pr_states["https://github.com/gregyu219/Jef/pull/20"] = "MERGED"
-    turns = len(w.procs["ada"])
-    w.pipeline.check_now(w.slug)
-    assert w.pipeline.tasks(w.slug).tasks[1].status is TaskStatus.IMPLEMENTATION
-    assert w.agent("impl-2").note == "Started by Jef after PR #20 merged"
-    assert len(w.procs["ada"]) == turns  # not asked
-    # Ada can't start tasks while it's off.
-    w.chats.send(w.slug, "ada", "hi")
-    w.reply("ada", "ACTION: start-task 2")
-    assert "Jef starts tasks itself" in w.agent("ada").note
-
-
-def test_coordinator_starts_toggle_on_the_page(w):
-    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
-                     chats=w.chats, pipeline=w.pipeline)
-    c = TestClient(app)
-    approved_with_one_task(w)
-    page = c.get(f"/projects/{w.slug}").text
-    assert "Ada decides when the next task starts" in page
-    c.post(f"/projects/{w.slug}/coordinator-starts", data={"on": "no"})
-    assert not w.pipeline.coordinator_starts(w.slug)
-    assert "Jef starts the next task straight away" in c.get(f"/projects/{w.slug}").text
-
-
-# ---- merge conflicts on open PRs
-
-PR20 = "https://github.com/gregyu219/Jef/pull/20"
-
-
-def pr_open_for_review(w):
-    approved_with_one_task(w)
-    w.reply("impl-1", READY)
-    assert w.pipeline.tasks(w.slug).tasks[0].pr == PR20
-
-
-def test_a_conflict_is_noticed_and_the_coordinator_decides(w):
-    pr_open_for_review(w)
-    w.mergeable[PR20] = "CONFLICTING"
-    w.pipeline.check_now(w.slug)
-    assert w.agent("impl-1").note == "PR has conflicts with main"
-    assert "ACTION: fix-conflict 1" in w.last_message("ada")
-    assert w.pipeline.conflict(w.slug) == ("asked", 1)
-    turns = len(w.procs["ada"])
-    w.pipeline.check_now(w.slug)
-    assert len(w.procs["ada"]) == turns  # asked once, not on every check
-
-    w.reply("ada", "Rebase it.\nACTION: fix-conflict 1")
-    assert "git rebase origin/main" in w.last_message("impl-1")
-    assert w.pipeline.conflict(w.slug) == ("fixing", 1)
-    assert w.agent("impl-1").note == "Fixing merge conflicts (asked by Ada)"
-
-    # Fixed: Jef pushes to the same PR and says why on it.
-    w.mergeable[PR20] = "MERGEABLE"
-    w.reply("impl-1", READY)
-    assert len(w.publisher.calls) == 2 and w.pipeline.tasks(w.slug).tasks[0].pr == PR20
-    assert w.agent("impl-1").note == "Conflicts fixed, PR updated, waiting for your review"
-    assert w.publisher.comments == [(PR20, "Jef: rebased on main to fix merge conflicts.")]
-    assert w.pipeline.conflict(w.slug) is None
-
-
-def test_the_coordinator_can_wait_on_a_conflict(w):
-    pr_open_for_review(w)
-    w.mergeable[PR20] = "CONFLICTING"
-    w.pipeline.check_now(w.slug)
-    w.reply("ada", "These two disagree.\nACTION: wait choose between the old and new footer")
-    assert "Ada is waiting for you: choose between the old and new footer" in w.pipeline.problem(w.slug)
-    assert w.pipeline.conflict(w.slug) is None
-    turns = len(w.procs["ada"])
-    w.pipeline.check_now(w.slug)
-    assert len(w.procs["ada"]) == turns  # not asked again while waiting for you
-    w.pipeline.clear_problem(w.slug)
-    w.pipeline.check_now(w.slug)
-    assert "ACTION: fix-conflict 1" in w.last_message("ada")
-
-
-def test_a_conflict_fixed_on_github_needs_nothing(w):
-    pr_open_for_review(w)
-    w.mergeable[PR20] = "CONFLICTING"
-    w.pipeline.check_now(w.slug)
-    w.mergeable[PR20] = "MERGEABLE"
-    w.pipeline.check_now(w.slug)
-    assert w.pipeline.conflict(w.slug) is None
-
-
-def test_turned_off_jef_sends_the_conflict_straight_to_the_implementer(w):
-    w.pipeline.set_coordinator_starts(w.slug, False)
-    pr_open_for_review(w)
-    w.mergeable[PR20] = "CONFLICTING"
-    turns = len(w.procs["ada"])
-    w.pipeline.check_now(w.slug)
-    assert len(w.procs["ada"]) == turns
-    assert "git rebase origin/main" in w.last_message("impl-1")
-    assert w.agent("impl-1").note == "Fixing merge conflicts (asked by Jef)"
-
-
-def test_a_merge_makes_every_project_check_its_prs(w):
-    other = w.ws.project_dir("other-project")
-    other.mkdir(parents=True)
-    (other / "goal.md").write_text("# Goal: Other\n\n- Repo: gregyu219/Jef\n")
-    w.pipeline._last_pr_check["other-project"] = w.clock
-    pr_open_for_review(w)
-    w.pr_states[PR20] = "MERGED"
-    w.pipeline.check_now(w.slug)
-    assert w.pipeline._last_pr_check["other-project"] == float("-inf")
-
-
-def test_a_new_pr_links_the_closed_one(w):
-    pr_open_for_review(w)
-    w.pr_states[PR20] = "CLOSED"
-    w.publisher.open.clear()  # GitHub has no open PR for the branch any more
-    w.chats.send(w.slug, "impl-1", "The PR was closed; open it again")
-    w.reply("impl-1", READY)
-    assert w.publisher.calls[-1][3].startswith(f"Replaces {PR20}, which was closed without merging.")
-    assert w.pipeline.tasks(w.slug).tasks[0].pr == "https://github.com/gregyu219/Jef/pull/21"
-    assert w.agent("impl-1").note == "PR opened, waiting for your review"
+def test_heartbeat_marks_jef_alive_and_answers_requests(w):
+    w.reply("ada", "hi")
+    request_id = inbox.submit(w.ws, w.slug, "ada", "research", {})
+    Heartbeat(w.pipeline).inbox_all()
+    assert inbox.jef_is_running(w.ws)
+    assert inbox.wait_for_answer(w.ws, w.slug, request_id, 0)["ok"]

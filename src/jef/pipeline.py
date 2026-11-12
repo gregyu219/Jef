@@ -1,39 +1,35 @@
-"""What happens after you start a project, from "go" to merged PRs.
+"""How a project runs, from "go" to merged PRs.
 
-A project moves through these phases. Jef works out the phase from the
-project's files, so there's no hidden state:
+**The coordinator runs its project.** It talks with you, starts research,
+plans the tasks, starts implementers one at a time, nudges them, checks their
+PRs on GitHub (merged? conflicts?) and sends work back. It does all of that
+with ``jef project …`` commands (see ``jef.coordinate``), which Jef carries out
+from its inbox (``jef.inbox``). Jef doesn't decide anything itself.
+
+**Jef only keeps time and keeps the rules.** While it runs, it:
+
+- carries out coordinators' requests within a few seconds, refusing anything
+  against the rules (one task at a time, only the coordinator's own agents,
+  secrets never pushed, never ``main``),
+- wakes each coordinator once per heartbeat (an hour by default), or sooner
+  when one of its agents finishes a turn or you press a button,
+- saves the research agent's findings as research.md, and
+- reads the files to keep status.md up to date. That costs nothing: no LLM
+  call and no GitHub call.
+
+A coordinator can't wake itself: each agent is a Claude Code session that
+only runs while it answers a message. That's the one thing Jef's timer is for.
+
+The phase comes from the project's files, so there's no hidden state:
 
     Understanding  you and the coordinator talk until you say go
     Research       a research agent studies the repo and writes research.md
     Planning       the coordinator turns research.md into tasks.md
-    Approval       you look at the tasks and approve them (or ask for changes);
-                   if you haven't by the next heartbeat, the coordinator decides
-                   (unless that's turned off for the project)
-    Building       one implementer per task, each on its own branch, opens a PR;
-                   after each merge the coordinator decides when the next starts
-                   (unless that's turned off, then Jef starts it straight away)
+    Approval       you approve the tasks (or, if it's allowed and you haven't
+                   by the next heartbeat, the coordinator does)
+    Building       the coordinator starts one implementer per task; Jef pushes
+                   each finished branch and opens its PR
     Done           every task's PR is merged
-
-The heartbeat (``Heartbeat``) ticks every few seconds. On each tick it reads
-the replies agents finished since last time and acts on them, starts
-implementers for tasks that are ready, and, once per heartbeat interval
-(an hour by default), nudges implementers that are still working and checks
-GitHub for merged PRs.
-
-Agents only reply in text. Jef reads a few plain markers in those replies:
-
-- the coordinator ends with ``ACTION: start-research`` when you say go,
-- the coordinator puts the task list in a fenced ``tasks`` block,
-- the coordinator ends with ``ACTION: approve-tasks`` to approve a waiting list,
-- after a PR merges, the coordinator ends with ``ACTION: start-task <n>`` to start
-  the next task (after revising the remaining tasks in a ``tasks`` block, if
-  needed), or ``ACTION: wait <reason>`` if it needs you first,
-- when an open PR has merge conflicts, the coordinator ends with
-  ``ACTION: fix-conflict <n>`` and Jef sends the task back to its implementer,
-- implementers end with ``STATUS: working | ready | stuck <reason>``; with ``ready``
-  they include a ``pr`` block, and Jef pushes the branch and opens the PR itself.
-
-Jef writes research.md and tasks.md itself, from those replies.
 """
 
 from __future__ import annotations
@@ -47,92 +43,37 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from jef import skills, usage
+from jef import inbox, skills, usage
 from jef.backlog import Backlog, BacklogStatus
-from jef.chats import Agent, Chats, ChatError, Reply, Role, Status
-from jef.projects import (
-    DEFAULT_HEARTBEAT_MINUTES,
-    agent_name,
-    goal_fields,
-    load_project,
-    set_goal_field,
-)
+from jef.chats import Agent, Chats, ChatError, Role, Status, load_roster
+from jef.projects import DEFAULT_HEARTBEAT_MINUTES, goal_fields, load_project, set_goal_field
 from jef.publish import Publisher, PublishError
-from jef.status import WAITING, Phase, project_phase, write_status
+from jef.status import WAITING, Phase, project_phase, render_status, write_status
 from jef.tasks import Task, TaskList, TaskStatus
 from jef.workspace import Workspace
 
 log = logging.getLogger("jef.pipeline")
 
 RESEARCH_AGENT = "research"
-TICK_SECONDS = 15
-PR_CHECK_SECONDS = 300  # merged PRs are noticed within five minutes
-# Tasks usually build on each other, so by default one task is in flight at a
-# time: the next starts once the last one's PR is merged (and the coordinator
-# says so).
+INBOX_SECONDS = 2  # how often Jef looks for coordinators' requests
+TICK_SECONDS = 30  # how often Jef re-reads the files and sees who to wake
+# Tasks usually build on each other, so one task is in flight at a time: the
+# coordinator starts the next once the last one's PR is merged.
 IMPLEMENTERS_AT_ONCE = 1
 MAX_CONTEXT_CHARS = 30_000
+MAX_READ_CHARS = 12_000
 
-ACTION_START_RESEARCH = re.compile(r"^\s*ACTION:\s*start-research\s*$", re.I | re.M)
-ACTION_APPROVE_TASKS = re.compile(r"^\s*ACTION:\s*approve-tasks\s*$", re.I | re.M)
-ACTION_START_TASK = re.compile(r"^\s*ACTION:\s*start-task\s+#?(\d+)\s*$", re.I | re.M)
-ACTION_FIX_CONFLICT = re.compile(r"^\s*ACTION:\s*fix-conflict\s+#?(\d+)\s*$", re.I | re.M)
-ACTION_WAIT = re.compile(r"^\s*ACTION:\s*wait\b[ \t:]*(.*?)\s*$", re.I | re.M)
-TASKS_BLOCK = re.compile(r"```tasks\s*\n(.*?)```", re.S | re.I)
-TASK_LINE = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
-STATUS_LINE = re.compile(r"^\s*STATUS:\s*(working|ready|pr-opened|stuck)\b(.*)$", re.I | re.M)
 PR_BLOCK = re.compile(r"```pr\s*\n(.*?)```", re.S | re.I)
-MAX_PUBLISH_ATTEMPTS = 3
-PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 BUDGET_PROBLEM = "Budget reached"  # how a budget pause starts, so raising the budget can lift it
 MAX_BUDGET_USD = 100_000
+IN_FLIGHT = (TaskStatus.IMPLEMENTATION, TaskStatus.PENDING_REVIEW)
 
 
 class PipelineError(RuntimeError):
-    pass
+    """A request Jef refused or couldn't do; the message says why, plainly."""
 
 
-# ---- reading agent replies
-
-
-def parse_numbered_tasks(text: str) -> list[tuple[int, str]]:
-    """(number, title) for each task in the last ```tasks block in a reply."""
-    blocks = TASKS_BLOCK.findall(text)
-    if not blocks:
-        return []
-    found = []
-    for line in blocks[-1].splitlines():
-        match = TASK_LINE.match(line)
-        if match:
-            found.append((int(match.group(1)), match.group(2)))
-    return found
-
-
-def parse_tasks(text: str) -> list[str]:
-    """Task titles from the last ```tasks block in a reply."""
-    return [title for _, title in parse_numbered_tasks(text)]
-
-
-def parse_start_task(text: str) -> int | None:
-    found = ACTION_START_TASK.findall(text)
-    return int(found[-1]) if found else None
-
-
-def parse_fix_conflict(text: str) -> int | None:
-    found = ACTION_FIX_CONFLICT.findall(text)
-    return int(found[-1]) if found else None
-
-
-def parse_wait(text: str) -> str | None:
-    """The reason in the last ``ACTION: wait <reason>`` line, or None."""
-    found = ACTION_WAIT.findall(text)
-    return (found[-1].strip() or "no reason given") if found else None
-
-
-def pr_label(url: str) -> str:
-    """"PR #30" for a GitHub PR link."""
-    number = url.rstrip("/").rsplit("/", 1)[-1]
-    return f"PR #{number}" if number.isdigit() else "the PR"
+# ---- small helpers
 
 
 def parse_pr(text: str) -> tuple[str, str] | None:
@@ -147,22 +88,10 @@ def parse_pr(text: str) -> tuple[str, str] | None:
     return title, "\n".join(lines).strip()
 
 
-def parse_status(text: str) -> tuple[str, str] | None:
-    """The last STATUS line: ("working" | "pr-opened" | "stuck", the rest)."""
-    found = STATUS_LINE.findall(text)
-    if not found:
-        return None
-    kind, rest = found[-1]
-    return kind.lower(), rest.strip()
-
-
-def without_markers(text: str) -> str:
-    text = STATUS_LINE.sub("", text)
-    text = ACTION_APPROVE_TASKS.sub("", text)
-    text = ACTION_START_TASK.sub("", text)
-    text = ACTION_WAIT.sub("", text)
-    text = ACTION_FIX_CONFLICT.sub("", text)
-    return ACTION_START_RESEARCH.sub("", text).strip()
+def pr_label(url: str) -> str:
+    """"PR #30" for a GitHub PR link."""
+    number = url.rstrip("/").rsplit("/", 1)[-1]
+    return f"PR #{number}" if number.isdigit() else "the PR"
 
 
 def _short(text: str, limit: int = 160) -> str:
@@ -203,34 +132,50 @@ class Git:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._git(repo, "worktree", "add", "--quiet", "-B", branch, str(path), f"origin/{base}")
 
-    def fetch(self, repo: Path) -> None:
-        """Bring the clone's view of GitHub up to date (it doesn't touch any files)."""
-        self._git(repo, "fetch", "--quiet", "origin")
+
+def _gh_field(url: str, name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", url, "--json", name, "--jq", f".{name}"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip().upper() if result.returncode == 0 else ""
 
 
 def gh_pr_state(url: str) -> str:
     """OPEN, MERGED or CLOSED, or "" if GitHub couldn't be asked."""
-    try:
-        result = subprocess.run(
-            ["gh", "pr", "view", url, "--json", "state", "--jq", ".state"],
-            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return result.stdout.strip().upper() if result.returncode == 0 else ""
+    return _gh_field(url, "state")
 
 
 def gh_pr_mergeable(url: str) -> str:
-    """MERGEABLE, CONFLICTING or UNKNOWN (GitHub is still working it out),
-    or "" if GitHub couldn't be asked."""
-    try:
-        result = subprocess.run(
-            ["gh", "pr", "view", url, "--json", "mergeable", "--jq", ".mergeable"],
-            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return result.stdout.strip().upper() if result.returncode == 0 else ""
+    """MERGEABLE, CONFLICTING or UNKNOWN (GitHub is still working it out), or ""."""
+    return _gh_field(url, "mergeable")
+
+
+# ---- reading agents' replies (also used by ``jef project read``)
+
+
+def last_reply(ws: Workspace, slug: str, name: str) -> str:
+    """An agent's latest reply, for its coordinator to read. Only reads files
+    (agents.md and the chat), so it's safe from outside the running Jef."""
+    agent = next((a for a in load_roster(ws, slug) if a.name == name), None)
+    if agent is None:
+        raise PipelineError(f"There's no agent named {name!r} in this project.")
+    replies = Chats(ws, "claude").replies(slug, name)
+    if not replies:
+        if agent.status is Status.WORKING:
+            return f"{name} is still working on its first turn. Check again at your next heartbeat."
+        return f"{name} hasn't replied yet."
+    prefix = f"({name} is still working on a newer turn; this is its previous reply.)\n\n" if agent.status is Status.WORKING else ""
+    reply = replies[-1]
+    if reply.is_error:
+        return prefix + f"{name}'s last turn failed: {reply.text or reply.subtype}"
+    text = reply.text.strip() or "(an empty reply)"
+    if len(text) > MAX_READ_CHARS:
+        text = "…(start left out)\n" + text[-MAX_READ_CHARS:]
+    return prefix + text
 
 
 # ---- the pipeline
@@ -245,13 +190,10 @@ class Pipeline:
     pr_state: Callable[[str], str] = gh_pr_state
     pr_mergeable: Callable[[str], str] = gh_pr_mergeable
     now: Callable[[], float] = time.time
-    _last_beat: dict[str, float] = field(default_factory=dict)
-    _last_pr_check: dict[str, float] = field(default_factory=dict)
+    _last_wake: dict[str, float] = field(default_factory=dict)
+    _events: dict[str, list[str]] = field(default_factory=dict)  # news for the coordinator's next wake
     _last_checked: dict[str, float] = field(default_factory=dict)
-    # When the coordinator was asked which task to start next, and whether it
-    # has been reminded since.
-    _next_asked: dict[str, float] = field(default_factory=dict)
-    _next_reminded: dict[str, bool] = field(default_factory=dict)
+    _budget_checked: dict[str, tuple[object, str]] = field(default_factory=dict)
 
     # -- reading project state
 
@@ -260,6 +202,9 @@ class Pipeline:
 
     def tasks(self, slug: str) -> TaskList:
         return TaskList.load(self.folder(slug) / "tasks.md")
+
+    def _save_tasks(self, slug: str, tasks: TaskList) -> None:
+        tasks.save(self.folder(slug) / "tasks.md")
 
     def research(self, slug: str) -> str:
         path = self.folder(slug) / "research.md"
@@ -276,29 +221,12 @@ class Pipeline:
         set_goal_field(self.workspace, slug, "Heartbeat", f"{minutes} minutes")
 
     def coordinator_decides(self, slug: str) -> bool:
-        """Whether the coordinator approves or revises a waiting task list at
-        the heartbeat. On unless goal.md says ``Coordinator decides: no``."""
+        """Whether the coordinator may approve its own task list once it has
+        waited a heartbeat for you. On unless goal.md says ``Coordinator decides: no``."""
         return goal_fields(self.workspace, slug).get("coordinator decides", "").lower() != "no"
 
     def set_coordinator_decides(self, slug: str, on: bool) -> None:
         set_goal_field(self.workspace, slug, "Coordinator decides", "yes" if on else "no")
-        if on:
-            # Turning it on gives you a full interval before the coordinator is asked.
-            self._last_beat[slug] = self.now()
-
-    def coordinator_starts(self, slug: str) -> bool:
-        """Whether the coordinator decides when the next task starts after a
-        merge. On unless goal.md says ``Coordinator starts tasks: no``; then
-        Jef starts the next task as soon as the last PR is merged."""
-        return goal_fields(self.workspace, slug).get("coordinator starts tasks", "").lower() != "no"
-
-    def set_coordinator_starts(self, slug: str, on: bool) -> None:
-        with self.chats.lock:
-            set_goal_field(self.workspace, slug, "Coordinator starts tasks", "yes" if on else "no")
-            if not on:
-                set_goal_field(self.workspace, slug, "Next task asked", "no")
-                if WAITING in self.problem(slug):
-                    set_goal_field(self.workspace, slug, "Problem", "none")
 
     def budget_usd(self, slug: str) -> float | None:
         return usage.budget_usd(self.workspace, slug)
@@ -310,6 +238,7 @@ class Pipeline:
             raise PipelineError(f"Pick a budget above $0 and up to ${MAX_BUDGET_USD:,}, or leave it empty for none.")
         with self.chats.lock:
             set_goal_field(self.workspace, slug, "Budget", f"{amount:.2f} USD" if amount is not None else "none")
+            self._budget_checked.pop(slug, None)
             over = self._budget_problem(slug)
             if over:
                 set_goal_field(self.workspace, slug, "Problem", over)
@@ -317,17 +246,26 @@ class Pipeline:
                 set_goal_field(self.workspace, slug, "Problem", "none")
 
     def _budget_problem(self, slug: str) -> str:
-        """Why the project is paused for its budget, or "" if it isn't."""
+        """Why the project is paused for its budget, or "" if it isn't.
+        Adding up the spending reads every chat, so it's only redone when a
+        chat file has grown."""
+        chats = self.folder(slug) / "chats"
+        sizes = tuple(sorted((f.name, f.stat().st_size) for f in chats.glob("*.jsonl"))) if chats.is_dir() else ()
+        key = (sizes, goal_fields(self.workspace, slug).get("budget", ""))
+        cached = self._budget_checked.get(slug)
+        if cached and cached[0] == key:
+            return cached[1]
         budget = self.budget_usd(slug)
-        if budget is None:
-            return ""
-        spent = usage.project_total(self.workspace, slug).cost_usd
-        if spent < budget:
-            return ""
-        return (
-            f"{BUDGET_PROBLEM}: {usage.format_cost(spent)} of {usage.format_cost(budget)} used (estimated). "
-            "Raise the budget to carry on."
-        )
+        problem = ""
+        if budget is not None:
+            spent = usage.project_total(self.workspace, slug).cost_usd
+            if spent >= budget:
+                problem = (
+                    f"{BUDGET_PROBLEM}: {usage.format_cost(spent)} of {usage.format_cost(budget)} used (estimated). "
+                    "Raise the budget to carry on."
+                )
+        self._budget_checked[slug] = (key, problem)
+        return problem
 
     def phase(self, slug: str) -> Phase:
         return project_phase(self.workspace, slug, self.chats.refresh(slug))
@@ -337,86 +275,42 @@ class Pipeline:
         with self.chats.lock:
             return write_status(self.workspace, slug, self.chats.refresh(slug))
 
+    def problem(self, slug: str) -> str:
+        """Something that stopped the project and needs you, or ""."""
+        value = goal_fields(self.workspace, slug).get("problem", "")
+        return "" if value.lower() in ("", "none") else value
+
     def _agent(self, slug: str, name: str) -> Agent | None:
         return next((a for a in self.chats.refresh(slug) if a.name == name), None)
 
-    # -- things you (or the coordinator) trigger
+    def _coordinator(self, slug: str) -> Agent | None:
+        project = load_project(self.workspace, slug)
+        return self._agent(slug, project.coordinator_agent) if project else None
 
-    def start_research(self, slug: str) -> None:
+    def _tell_coordinator(self, slug: str, news: str) -> None:
+        """Queue news for the coordinator's next wake (the next tick, if it's free)."""
+        self._events.setdefault(slug, []).append(news)
+
+    # -- your buttons
+
+    def clear_problem(self, slug: str) -> None:
         with self.chats.lock:
-            if self.phase(slug) is not Phase.UNDERSTANDING:
-                raise PipelineError("Research has already started for this project.")
-            project = load_project(self.workspace, slug)
-            self.chats.spawn(
-                slug,
-                RESEARCH_AGENT,
-                Role.RESEARCH,
-                self._research_message(slug),
-                self.folder(slug) / "repo",
-                parent=project.coordinator_agent,
-                instructions=skills.load("research"),
-            )
-            set_goal_field(self.workspace, slug, "Research", "started")
-            self.write_status(slug)
-
-    def approve_tasks(self, slug: str) -> None:
-        with self.chats.lock:
-            if self.phase(slug) is not Phase.APPROVAL:
-                raise PipelineError("There are no tasks waiting for approval.")
-            set_goal_field(self.workspace, slug, "Tasks approved", "yes")
-            self._build(slug)
-            self.write_status(slug)
-
-    # -- the heartbeat
-
-    def tick(self, slug: str) -> None:
-        with self.chats.lock:
-            if load_project(self.workspace, slug) is None or self.phase(slug) in (Phase.DONE, Phase.STOPPED):
-                return
-            over = self._budget_problem(slug)
-            if over:
-                # Paused: no new turns, and replies wait until the budget is raised.
-                if self.problem(slug) != over:
-                    set_goal_field(self.workspace, slug, "Problem", over)
-                return
-            for agent in self.chats.refresh(slug):
-                if agent.status is Status.WORKING:
-                    continue
-                replies = self.chats.replies(slug, agent.name)
-                for reply in replies[agent.handled:]:
-                    self._on_reply(slug, agent, reply)
-                    agent.handled += 1
-                    self.chats.update(slug, agent)
-            phase = self.phase(slug)
-            if phase is Phase.PLANNING:
-                self._ask_for_tasks(slug)
-            if phase is Phase.APPROVAL:
-                self._ask_for_decision(slug)
-            if phase is Phase.BUILDING:
-                now = self.now()
-                if now - self._last_pr_check.get(slug, 0) >= PR_CHECK_SECONDS:
-                    self._last_pr_check[slug] = now
-                    self._check_prs(slug)
-                if now - self._last_beat.get(slug, 0) >= self.heartbeat_minutes(slug) * 60:
-                    self._last_beat[slug] = now
-                    self._nudge(slug)
-                self._build(slug)
+            problem = self.problem(slug)
+            set_goal_field(self.workspace, slug, "Problem", "none")
+            if problem and not problem.startswith(BUDGET_PROBLEM):
+                self._tell_coordinator(slug, f"The person pressed Try again on: {problem}")
+            self.tick(slug)
 
     def check_now(self, slug: str) -> None:
-        """The "Check status now" button: the heartbeat's checks, straight away.
-
-        Reads finished replies, asks GitHub about every PR waiting for review and
-        starts the next task, but doesn't nudge implementers early, so it costs
-        no tokens.
-        """
+        """The "Check status now" button: re-read the files straight away. It
+        only wakes the coordinator if there's news for it, so it costs nothing
+        otherwise."""
         with self.chats.lock:
             if load_project(self.workspace, slug) is None:
                 raise PipelineError("There's no such project.")
             if self.phase(slug) in (Phase.DONE, Phase.STOPPED):
                 raise PipelineError("This project is finished, so there's nothing to check.")
-            # Make tick check PRs after it has read replies, so a PR opened by a
-            # reply it reads now is checked too. _last_beat is left alone.
-            self._last_pr_check[slug] = float("-inf")
+            self.process_inbox(slug)
             self.tick(slug)
             self.write_status(slug)
             self._last_checked[slug] = self.now()
@@ -425,359 +319,243 @@ class Pipeline:
         """When you last pressed "Check status now", if Jef has run since."""
         return self._last_checked.get(slug)
 
-    def _on_reply(self, slug: str, agent: Agent, reply: Reply) -> None:
-        if reply.is_error:
-            if "budget" in reply.subtype:
-                agent.note = "Last turn stopped partway: it reached the project budget"
-            else:
-                agent.note = "Last turn failed: " + _short(reply.text or reply.subtype)
-            return
-        if agent.role is Role.COORDINATOR:
-            phase = self.phase(slug)
-            if ACTION_START_RESEARCH.search(reply.text) and phase is Phase.UNDERSTANDING:
-                self.start_research(slug)
-                agent.note = "Started research"
-            titles = parse_tasks(reply.text)
-            if titles and phase in (Phase.PLANNING, Phase.APPROVAL):
-                tasks = self.tasks(slug)
-                tasks.tasks = [Task(i, title) for i, title in enumerate(titles, start=1)]
-                tasks.save(self.folder(slug) / "tasks.md")
-                agent.note = f"Proposed {len(titles)} tasks"
-                # You get a full heartbeat to approve by hand before the
-                # coordinator is asked; a revised list restarts the wait.
-                self._last_beat[slug] = self.now()
-            elif ACTION_APPROVE_TASKS.search(reply.text) and phase is Phase.APPROVAL:
-                # The phase is from before this reply, so a list proposed and
-                # approved in one go is never approved: it waits at least once.
-                if self.coordinator_decides(slug):
-                    self.approve_tasks(slug)
-                    agent.note = "Approved the tasks"
-                else:
-                    agent.note = "Tried to approve the tasks, but that's turned off: approve them yourself"
-            if phase is Phase.BUILDING:
-                self._on_building_reply(slug, agent, reply.text)
-        elif agent.role is Role.RESEARCH:
-            findings = without_markers(reply.text)
-            if findings and goal_fields(self.workspace, slug).get("research", "").lower() == "started":
-                (self.folder(slug) / "research.md").write_text(findings + "\n", encoding="utf-8")
-                set_goal_field(self.workspace, slug, "Research", "done")
-                agent.note = "Findings written to research.md"
-        elif agent.role is Role.IMPLEMENTER:
-            self._on_implementer_reply(slug, agent, reply.text)
-
-    def _on_implementer_reply(self, slug: str, agent: Agent, text: str) -> None:
-        status = parse_status(text)
-        if status is None:
-            agent.note = "Replied without a status line"
-            return
-        kind, rest = status
-        if kind in ("ready", "pr-opened"):
-            self._publish(slug, agent, text)
-        elif kind == "stuck":
-            agent.note = "Stuck: " + _short(rest or "no reason given")
-        else:
-            agent.note = "Working" + (": " + _short(rest) if rest else "")
-
-    def _publish(self, slug: str, agent: Agent, text: str) -> None:
-        """The implementer says it's done: Jef pushes the branch and opens the PR."""
-        tasks = self.tasks(slug)
-        task = next((t for t in tasks.tasks if t.agent == agent.name), None)
-        if task is None:
-            agent.note = "Said it's ready, but has no task"
-            return
-        pr = parse_pr(text)
-        if pr is None and not task.pr:
-            self._send_back(slug, agent, "There's no ```pr block with the PR title and description. Add one and report ready again.")
-            return
-        title, body = pr if pr else (task.title, "")
-        if task.pr and self.pr_state(task.pr) == "CLOSED":
-            # Jef only opens a new PR when the old one was closed; link it.
-            body = f"Replaces {task.pr}, which was closed without merging.\n\n" + (body or task.title)
-        try:
-            url = self.publisher.publish(
-                Path(agent.folder), self._branch(slug, task), self.git.default_branch(self.folder(slug) / "repo"),
-                title or task.title, body or task.title,
-            )
-        except (PublishError, OSError, subprocess.SubprocessError) as err:
-            self._send_back(slug, agent, str(err))
-            return
-        updated = bool(task.pr) and task.pr == url
-        task.status = TaskStatus.PENDING_REVIEW
-        task.pr = url
-        tasks.save(self.folder(slug) / "tasks.md")
-        agent.note = "PR updated, waiting for your review" if updated else "PR opened, waiting for your review"
-        if self.conflict(slug) == ("fixing", task.number):
-            self._set_conflict(slug, "none")
-            agent.note = "Conflicts fixed, PR updated, waiting for your review"
-            merged = goal_fields(self.workspace, slug).get("last merged", "")
-            try:
-                self.publisher.comment(
-                    Path(agent.folder), url,
-                    "Jef: rebased on main to fix merge conflicts"
-                    + (f" with {pr_label(merged).removeprefix('PR ')}." if merged else "."),
-                )
-            except (PublishError, OSError, subprocess.SubprocessError):
-                pass  # the fix is pushed; the comment is only a courtesy
-
-    def _send_back(self, slug: str, agent: Agent, problem: str) -> None:
-        """Tell the implementer what to fix, a few times at most."""
-        match = re.match(r"Couldn't open the PR \((\d+)\)", agent.note)
-        attempt = int(match.group(1)) + 1 if match else 1
-        if attempt > MAX_PUBLISH_ATTEMPTS:
-            agent.note = "Stuck: Jef couldn't open the PR after several tries: " + _short(problem)
-            return
-        agent.note = f"Couldn't open the PR ({attempt}): " + _short(problem)
-        try:
-            self.chats.send(slug, agent.name, f"Jef couldn't open your PR yet: {problem}", sender="jef")
-        except ChatError:
-            pass
-
-    def _on_building_reply(self, slug: str, agent: Agent, text: str) -> None:
-        """While building, the coordinator can start the next task (after
-        revising the tasks that haven't started, if needed), or ask to wait for
-        you. A ```tasks block on its own, without ``ACTION: start-task``,
-        changes nothing, so talking about the plan can't drop tasks by accident."""
-        start = parse_start_task(text)
-        wait = parse_wait(text)
-        fix = parse_fix_conflict(text)
-        if start is None and wait is None and fix is None:
-            return
-        if not self.coordinator_starts(slug):
-            agent.note = "Tried to start a task, but Jef starts tasks itself for this project"
-            return
-        notes = []
-        if fix is not None:
-            notes.append(self._fix_conflict(slug, fix, asked_by=load_project(self.workspace, slug).coordinator))
-        if start is not None:
-            revised = parse_numbered_tasks(text)
-            if revised:
-                notes.append(self._revise_remaining(slug, revised))
-            notes.append(self._start_for_coordinator(slug, agent, start))
-        elif wait is not None:
-            project = load_project(self.workspace, slug)
-            set_goal_field(self.workspace, slug, "Problem", _short(f"{project.coordinator} {WAITING}{wait}", 300))
-            set_goal_field(self.workspace, slug, "Next task asked", "no")
-            if fix is None:
-                # Ask again about any conflict once you press Try again.
-                set_goal_field(self.workspace, slug, "Conflict", "none")
-            notes.append("Waiting: " + _short(wait))
-        agent.note = ". ".join(notes)
-
-    def _revise_remaining(self, slug: str, revised: list[tuple[int, str]]) -> str:
-        """Replace the tasks that haven't started. Started and merged tasks
-        stay as they are, whatever the new block says about them."""
-        tasks = self.tasks(slug)
-        kept = [t for t in tasks.tasks if t.status is not TaskStatus.NOT_STARTED]
-        taken = {t.number for t in kept}
-        new = []
-        for number, title in revised:
-            if number not in taken:
-                taken.add(number)
-                new.append(Task(number, title))
-        tasks.tasks = sorted(kept + new, key=lambda t: t.number)
-        tasks.save(self.folder(slug) / "tasks.md")
-        return f"Revised the remaining tasks ({len(new)} left)"
-
-    def _start_for_coordinator(self, slug: str, coordinator: Agent, number: int) -> str:
-        """``ACTION: start-task <n>``: Jef starts it, if it can be started now."""
-        tasks = self.tasks(slug)
-        task = next((t for t in tasks.tasks if t.number == number), None)
-        if task is None:
-            return f"Asked to start task {number}, but there's no task {number}"
-        if task.status is not TaskStatus.NOT_STARTED:
-            return f"Asked to start task {number}, but it's already {task.status.value}"
-        busy = next((t for t in tasks.tasks if t.status in (TaskStatus.IMPLEMENTATION, TaskStatus.PENDING_REVIEW)), None)
-        if busy is not None:
-            return f"Asked to start task {number}, but task {busy.number} isn't merged yet"
-        problem = self.problem(slug)
-        if problem and WAITING not in problem:
-            return f"Asked to start task {number}, but there's a problem to sort out first"
-        project = load_project(self.workspace, slug)
-        merged = goal_fields(self.workspace, slug).get("last merged", "")
-        note = f"Started by {project.coordinator}" + (f" after {pr_label(merged)} merged" if merged else "")
-        try:
-            self._start_implementer(slug, tasks, task, note)
-        except (PipelineError, ChatError, OSError, subprocess.SubprocessError) as err:
-            set_goal_field(self.workspace, slug, "Problem", _short(f"Couldn't start task {task.number}: {err}", 300))
-            return f"Asked to start task {number}, but Jef couldn't start it"
-        if problem:
-            set_goal_field(self.workspace, slug, "Problem", "none")  # it was only waiting for this
-        set_goal_field(self.workspace, slug, "Next task asked", "no")
-        return f"Started task {number}"
-
-    def _ask_for_next_task(self, slug: str) -> None:
-        """After a merge: ask the coordinator which task starts next. If it
-        hasn't said by the next heartbeat, remind it once; if it still hasn't
-        a heartbeat later, stop and show you a problem. Never start silently."""
-        project = load_project(self.workspace, slug)
-        coordinator = self._agent(slug, project.coordinator_agent)
-        if coordinator is None or coordinator.status is not Status.IDLE:
-            return  # busy (maybe answering right now); ask on a later tick
-        now = self.now()
-        if goal_fields(self.workspace, slug).get("next task asked", "").lower() != "yes":
-            try:
-                self.git.fetch(self.folder(slug) / "repo")
-            except (PipelineError, OSError, subprocess.SubprocessError):
-                pass  # it can still decide from the PR on GitHub
-            try:
-                self.chats.send(slug, coordinator.name, self._next_task_message(slug), sender="jef")
-            except ChatError:
-                return
-            set_goal_field(self.workspace, slug, "Next task asked", "yes")
-            self._next_asked[slug], self._next_reminded[slug] = now, False
-            return
-        asked = self._next_asked.setdefault(slug, now)  # after a restart, wait a full interval
-        if now - asked < self.heartbeat_minutes(slug) * 60:
-            return
-        if not self._next_reminded.get(slug):
-            try:
-                self.chats.send(slug, coordinator.name, self._next_task_reminder(), sender="heartbeat")
-            except ChatError:
-                return
-            self._next_asked[slug], self._next_reminded[slug] = now, True
-            return
-        set_goal_field(
-            self.workspace, slug, "Problem",
-            f"{project.coordinator} hasn't said which task to start next. Ask in the chat, or press Try again to ask again.",
-        )
-        set_goal_field(self.workspace, slug, "Next task asked", "no")
-
-    # -- merge conflicts
-
-    def conflict(self, slug: str) -> tuple[str, int] | None:
-        """("asked" | "fixing", task number) while a PR's conflicts are being handled."""
-        value = goal_fields(self.workspace, slug).get("conflict", "").split()
-        if len(value) == 2 and value[0] in ("asked", "fixing") and value[1].isdigit():
-            return value[0], int(value[1])
-        return None
-
-    def _set_conflict(self, slug: str, value: str) -> None:
-        set_goal_field(self.workspace, slug, "Conflict", value)
-
-    def _on_conflict(self, slug: str, task: Task) -> None:
-        """An open PR can't merge any more. Ask the coordinator what to do, or,
-        if the coordinator doesn't start tasks for this project, send the task
-        straight back to its implementer."""
-        if self.conflict(slug) or self.problem(slug):
-            return  # already on it, or waiting for you
-        agent = self._agent(slug, task.agent) if task.agent else None
-        if agent is not None and not agent.note.startswith("PR has conflicts"):
-            agent.note = "PR has conflicts with main"
-            self.chats.update(slug, agent)
-        if not self.coordinator_starts(slug):
-            self._fix_conflict(slug, task.number, asked_by="Jef")
-            return
-        project = load_project(self.workspace, slug)
-        coordinator = self._agent(slug, project.coordinator_agent)
-        if coordinator is None or coordinator.status is not Status.IDLE:
-            return  # ask at the next check
-        try:
-            self.git.fetch(self.folder(slug) / "repo")
-        except (PipelineError, OSError, subprocess.SubprocessError):
-            pass
-        try:
-            self.chats.send(slug, coordinator.name, self._conflict_message(slug, task), sender="jef")
-        except ChatError:
-            return
-        self._set_conflict(slug, f"asked {task.number}")
-
-    def _fix_conflict(self, slug: str, number: int, asked_by: str) -> str:
-        """Send the task back to its implementer to rebase on main. Jef then
-        pushes the fixed branch to the same PR."""
-        task = next((t for t in self.tasks(slug).tasks if t.number == number), None)
-        if task is None or task.status is not TaskStatus.PENDING_REVIEW or not task.pr:
-            return f"Asked to fix conflicts on task {number}, but it has no PR waiting for review"
-        agent = self._agent(slug, task.agent) if task.agent else None
-        if agent is None or agent.status is Status.STOPPED:
-            set_goal_field(
-                self.workspace, slug, "Problem",
-                f"{pr_label(task.pr)} has merge conflicts, but its implementer has stopped. Fix it on GitHub, or close the PR.",
-            )
-            self._set_conflict(slug, "none")
-            return f"Asked to fix conflicts on task {number}, but its implementer has stopped"
-        try:
-            self.chats.send(slug, agent.name, self._conflict_fix_message(slug, task), sender="jef")
-        except ChatError as err:
-            return f"Couldn't ask {agent.name} to fix the conflicts yet: {err}"
-        self._set_conflict(slug, f"fixing {number}")
-        agent.note = f"Fixing merge conflicts (asked by {asked_by})"
-        self.chats.update(slug, agent)
-        return f"Asked {agent.name} to fix the conflicts on task {number}"
-
-    def _branch(self, slug: str, task: Task) -> str:
-        return f"jef/{slug}/task-{task.number}"
-
-    def _ask_for_tasks(self, slug: str) -> None:
-        if goal_fields(self.workspace, slug).get("planning requested", "").lower() == "yes":
-            return
-        project = load_project(self.workspace, slug)
-        coordinator = self._agent(slug, project.coordinator_agent)
-        if coordinator is None or coordinator.status is not Status.IDLE:
-            return  # busy talking to you; ask on a later tick
-        self.chats.send(slug, coordinator.name, self._planning_message(slug), sender="jef")
-        set_goal_field(self.workspace, slug, "Planning requested", "yes")
-
-    def _ask_for_decision(self, slug: str) -> None:
-        """Once per heartbeat while the tasks wait, ask the coordinator to decide."""
-        if not self.coordinator_decides(slug):
-            return  # turned off on the project page: only you approve
-        now = self.now()
-        # After a restart, wait a full interval rather than asking at once.
-        self._last_beat.setdefault(slug, now)
-        minutes = self.heartbeat_minutes(slug)
-        if now - self._last_beat[slug] < minutes * 60:
-            return
-        project = load_project(self.workspace, slug)
-        coordinator = self._agent(slug, project.coordinator_agent)
-        if coordinator is None or coordinator.status is not Status.IDLE:
-            return  # busy talking to you; ask on a later tick
-        try:
-            self.chats.send(slug, coordinator.name, self._decision_message(slug, now), sender="heartbeat")
-        except ChatError:
-            return
-        self._last_beat[slug] = now
-
-    def problem(self, slug: str) -> str:
-        """Something that stopped the pipeline and needs you, or ""."""
-        value = goal_fields(self.workspace, slug).get("problem", "")
-        return "" if value.lower() in ("", "none") else value
-
-    def clear_problem(self, slug: str) -> None:
+    def wake_now(self, slug: str) -> None:
+        """The "Ask the coordinator to check now" button: a heartbeat straight away."""
         with self.chats.lock:
-            set_goal_field(self.workspace, slug, "Problem", "none")
+            project = load_project(self.workspace, slug)
+            coordinator = self._coordinator(slug)
+            if project is None or coordinator is None or coordinator.status is Status.STOPPED:
+                raise PipelineError("This project's coordinator has stopped.")
+            if coordinator.status is Status.WORKING:
+                raise PipelineError(f"{project.coordinator} is busy right now. Try again when it's done.")
+            self._tell_coordinator(slug, "The person asked you to check on the project now.")
             self.tick(slug)
 
-    def _build(self, slug: str) -> None:
-        if self.problem(slug):
-            return  # wait for you to press Try again
-        tasks = self.tasks(slug)
-        in_flight = [t for t in tasks.tasks if t.status in (TaskStatus.IMPLEMENTATION, TaskStatus.PENDING_REVIEW)]
-        for task in tasks.tasks:
-            if len(in_flight) >= IMPLEMENTERS_AT_ONCE:
-                break
-            if task.status is not TaskStatus.NOT_STARTED:
-                continue
-            merged = goal_fields(self.workspace, slug).get("last merged", "")
-            after_merge = any(t.status is TaskStatus.MERGED for t in tasks.tasks)
-            if after_merge and self.coordinator_starts(slug):
-                # The first tasks start when the list is approved; after that
-                # the coordinator looks at what merged and decides.
-                self._ask_for_next_task(slug)
-                break
-            if after_merge:
-                note = "Started by Jef" + (f" after {pr_label(merged)} merged" if merged else "")
-            else:
-                note = "Started by Jef when the tasks were approved"
-            try:
-                self._start_implementer(slug, tasks, task, note)
-            except (PipelineError, ChatError, OSError, subprocess.SubprocessError) as err:
-                set_goal_field(self.workspace, slug, "Problem", _short(f"Couldn't start task {task.number}: {err}", 300))
-                return
-            in_flight.append(task)
-        if tasks.tasks and all(t.status is TaskStatus.MERGED for t in tasks.tasks):
-            self._finish(slug)
+    # -- things you or the coordinator can do. ``by`` is who asked: "you" or
+    #    the coordinator's name.
 
-    def _start_implementer(self, slug: str, tasks: TaskList, task: Task, note: str = "") -> None:
+    def start_research(self, slug: str, brief: str = "", by: str = "you") -> str:
+        with self.chats.lock:
+            if self.phase(slug) is not Phase.UNDERSTANDING:
+                raise PipelineError("Research has already started for this project.")
+            project = load_project(self.workspace, slug)
+            self.chats.spawn(
+                slug,
+                RESEARCH_AGENT,
+                Role.RESEARCH,
+                self._research_message(slug, brief),
+                self.folder(slug) / "repo",
+                parent=project.coordinator_agent,
+                instructions=skills.load("research"),
+            )
+            set_goal_field(self.workspace, slug, "Research", "started")
+            if by == "you":
+                self._tell_coordinator(slug, "The person pressed Start research, so the research agent is working.")
+            self.write_status(slug)
+            return "The research agent has started. Jef saves its findings as research.md and wakes you when it's done."
+
+    def plan(self, slug: str, titles: list[str], by: str) -> str:
+        """Set the task list. Before approval this replaces it; while building
+        it replaces only the tasks that haven't started."""
+        titles = [_short(t, 200) for t in titles if t.strip()]
+        with self.chats.lock:
+            phase = self.phase(slug)
+            if phase in (Phase.UNDERSTANDING, Phase.RESEARCH):
+                raise PipelineError("Research hasn't finished yet, so there's nothing to plan from.")
+            if phase in (Phase.DONE, Phase.STOPPED):
+                raise PipelineError("This project is finished.")
+            if not titles and phase is not Phase.BUILDING:
+                raise PipelineError('Give at least one task, like: jef project plan "Show the version in the footer"')
+            tasks = self.tasks(slug)
+            if phase is Phase.BUILDING:
+                kept = [t for t in tasks.tasks if t.status is not TaskStatus.NOT_STARTED]
+                after = max((t.number for t in kept), default=0)
+                tasks.tasks = kept + [Task(after + i, title) for i, title in enumerate(titles, start=1)]
+                self._save_tasks(slug, tasks)
+                self.write_status(slug)
+                return "Kept the tasks that have started, and set the rest:\n" + self._task_lines(tasks)
+            tasks.tasks = [Task(i, title) for i, title in enumerate(titles, start=1)]
+            self._save_tasks(slug, tasks)
+            # The list waits for the person: the coordinator may approve it
+            # only once it has waited a whole heartbeat.
+            set_goal_field(self.workspace, slug, "Tasks proposed", str(int(self.now())))
+            self.write_status(slug)
+            return "Saved the task list. It now waits for the person's approval:\n" + self._task_lines(tasks)
+
+    def approve_tasks(self, slug: str, by: str = "you") -> str:
+        with self.chats.lock:
+            if self.phase(slug) is not Phase.APPROVAL:
+                raise PipelineError("There are no tasks waiting for approval.")
+            if by != "you":
+                if not self.coordinator_decides(slug):
+                    raise PipelineError("The person turned off coordinator approval for this project. Ask them to approve.")
+                proposed = goal_fields(self.workspace, slug).get("tasks proposed", "")
+                waited = self.now() - int(proposed) if proposed.isdigit() else float("inf")
+                if waited < self.heartbeat_minutes(slug) * 60:
+                    raise PipelineError(
+                        "The list has to wait one heartbeat for the person before you can approve it. "
+                        "Ask them, and decide at your next heartbeat if they haven't."
+                    )
+            set_goal_field(self.workspace, slug, "Tasks approved", "yes")
+            if by == "you":
+                self._tell_coordinator(slug, "The person approved the tasks. Start the first one with `jef project start 1`.")
+            self.write_status(slug)
+            return "The tasks are approved. Start the first with `jef project start 1`."
+
+    def start_task(self, slug: str, number: int, by: str) -> str:
+        with self.chats.lock:
+            if self.phase(slug) is not Phase.BUILDING:
+                raise PipelineError("The tasks haven't been approved yet.")
+            problem = self.problem(slug)
+            if problem and WAITING not in problem:
+                raise PipelineError(f"There's a problem to sort out first: {problem}")
+            tasks = self.tasks(slug)
+            task = next((t for t in tasks.tasks if t.number == number), None)
+            if task is None:
+                raise PipelineError(f"There's no task {number}. See `jef project status`.")
+            if task.status is not TaskStatus.NOT_STARTED:
+                raise PipelineError(f"Task {number} has already started ({task.status.value}).")
+            busy = [t for t in tasks.tasks if t.status in IN_FLIGHT]
+            if len(busy) >= IMPLEMENTERS_AT_ONCE:
+                raise PipelineError(
+                    f"Task {busy[0].number} isn't merged yet, and only {IMPLEMENTERS_AT_ONCE} task is built at a time."
+                )
+            merged = goal_fields(self.workspace, slug).get("last merged", "")
+            note = f"Started by {by}" + (f" after {pr_label(merged)} merged" if merged else "")
+            try:
+                name = self._start_implementer(slug, tasks, task, note)
+            except (OSError, subprocess.SubprocessError) as err:
+                raise PipelineError(f"Couldn't start task {number}: {err}") from err
+            if problem:
+                set_goal_field(self.workspace, slug, "Problem", "none")  # it was only waiting for this
+            self.write_status(slug)
+            return f"Started {name} on task {number}. Jef wakes you when it finishes a turn."
+
+    def send_to(self, slug: str, name: str, message: str, by: str) -> str:
+        """Message one of the coordinator's agents: a nudge, feedback, a fix."""
+        if not message.strip():
+            raise PipelineError("The message is empty.")
+        with self.chats.lock:
+            project = load_project(self.workspace, slug)
+            agent = self._agent(slug, name)
+            if agent is None or agent.parent != project.coordinator_agent:
+                raise PipelineError(f"{name!r} isn't one of your agents. See `jef project status`.")
+            self.chats.send(slug, name, message.strip(), sender=by)
+            return f"Sent to {name}. Jef wakes you when it finishes the turn."
+
+    def stop_agent(self, slug: str, name: str, by: str) -> str:
+        with self.chats.lock:
+            project = load_project(self.workspace, slug)
+            agent = self._agent(slug, name)
+            if agent is None or agent.parent != project.coordinator_agent:
+                raise PipelineError(f"{name!r} isn't one of your agents.")
+            self.chats.stop(slug, name)
+            return f"Stopped {name}."
+
+    def wait_for_person(self, slug: str, reason: str, by: str) -> str:
+        reason = reason.strip() or "no reason given"
+        with self.chats.lock:
+            set_goal_field(self.workspace, slug, "Problem", _short(f"{by} {WAITING}{reason}", 300))
+            return "The project page now shows that you're waiting. Starting a task lifts it."
+
+    def publish(self, slug: str, number: int, note: str = "", by: str = "you") -> str:
+        """Push a task's branch and open its PR, or update the open one. The
+        PR text comes from the implementer's latest ```pr block."""
+        with self.chats.lock:
+            tasks = self.tasks(slug)
+            task = next((t for t in tasks.tasks if t.number == number), None)
+            if task is None or not task.agent:
+                raise PipelineError(f"Task {number} has no implementer yet.")
+            if task.status is TaskStatus.MERGED:
+                raise PipelineError(f"Task {number} is already merged.")
+            agent = self._agent(slug, task.agent)
+            if agent is None:
+                raise PipelineError(f"Task {number}'s implementer isn't in agents.md.")
+            if agent.status is Status.WORKING:
+                raise PipelineError(f"{agent.name} is still working. Publish once its turn is done.")
+            texts = [r.text for r in self.chats.replies(slug, agent.name)]
+            pr = next((found for found in map(parse_pr, reversed(texts)) if found), None)
+            if pr is None and not task.pr:
+                raise PipelineError(
+                    f"{agent.name} hasn't written a ```pr block with the PR title and description. Ask it for one."
+                )
+            title, body = pr if pr else (task.title, "")
+            title, body = title or task.title, body or task.title
+            replaced = task.pr if task.pr and self.pr_state(task.pr) == "CLOSED" else ""
+            if replaced:
+                # Jef only opens a new PR when the old one was closed; link it.
+                body = f"Replaces {replaced}, which was closed without merging.\n\n" + body
+            repo = self.folder(slug) / "repo"
+            try:
+                url = self.publisher.publish(
+                    Path(agent.folder), self._branch(slug, task), self.git.default_branch(repo), title, body
+                )
+            except (OSError, subprocess.SubprocessError) as err:
+                raise PipelineError(f"Jef couldn't publish: {err}") from err
+            updated = bool(task.pr) and task.pr == url
+            task.status = TaskStatus.PENDING_REVIEW
+            task.pr = url
+            self._save_tasks(slug, tasks)
+            agent.note = ("PR updated" if updated else "PR opened") + ", waiting for your review"
+            self.chats.update(slug, agent)
+            said = f"{'Updated' if updated else 'Opened'} {pr_label(url)}: {url}"
+            if updated and note.strip():
+                try:
+                    self.publisher.comment(Path(agent.folder), url, f"Jef: {_short(note, 500)}")
+                    said += " (and left your note on it)"
+                except (PublishError, OSError, subprocess.SubprocessError) as err:
+                    said += f" (couldn't leave the note: {err})"
+            self.write_status(slug)
+            return said
+
+    def check_prs(self, slug: str) -> str:
+        """Ask GitHub about every task's PR. Records merges (stopping their
+        implementers) and reports conflicts, for the coordinator to act on."""
+        with self.chats.lock:
+            tasks = self.tasks(slug)
+            lines, changed = [], False
+            for task in tasks.tasks:
+                if not task.pr or task.status is TaskStatus.MERGED:
+                    continue
+                state = self.pr_state(task.pr)
+                label = f"Task {task.number} ({pr_label(task.pr)})"
+                if state == "MERGED":
+                    task.status, changed = TaskStatus.MERGED, True
+                    set_goal_field(self.workspace, slug, "Last merged", task.pr)
+                    agent = self._agent(slug, task.agent) if task.agent else None
+                    if agent is not None and agent.status is not Status.STOPPED:
+                        self.chats.stop(slug, agent.name)
+                    lines.append(f"{label}: merged. Its implementer is stopped.")
+                elif state == "CLOSED":
+                    lines.append(f"{label}: closed without merging. Decide with the person what to do.")
+                elif state == "OPEN":
+                    mergeable = self.pr_mergeable(task.pr)
+                    if mergeable == "CONFLICTING":
+                        lines.append(f"{label}: open, but it has merge conflicts with the main branch.")
+                    elif mergeable == "MERGEABLE":
+                        lines.append(f"{label}: open, waiting for the person's review. It can merge.")
+                    else:
+                        lines.append(f"{label}: open. GitHub is still working out whether it can merge; check again later.")
+                else:
+                    lines.append(f"{label}: GitHub didn't answer. Try again later.")
+            if changed:
+                self._save_tasks(slug, tasks)
+            if tasks.tasks and all(t.status is TaskStatus.MERGED for t in tasks.tasks):
+                self._finish(slug)
+                lines.append("Every task is merged, so the project is done. Tell the person; Jef stops you after this turn.")
+            self.write_status(slug)
+            return "\n".join(lines) or "No task has a PR yet."
+
+    def _finish(self, slug: str) -> None:
+        set_goal_field(self.workspace, slug, "Done", "yes")
+        number = goal_fields(self.workspace, slug).get("backlog item", "").lstrip("#")
+        backlog = Backlog.load(self.workspace.backlog_file)
+        for item in backlog.items:
+            if str(item.number) == number:
+                item.status = BacklogStatus.DONE
+        backlog.save(self.workspace.backlog_file)
+
+    def _start_implementer(self, slug: str, tasks: TaskList, task: Task, note: str) -> str:
         name = f"impl-{task.number}"
         repo = self.folder(slug) / "repo"
         base = self.git.default_branch(repo)
@@ -797,76 +575,158 @@ class Pipeline:
         )
         task.status = TaskStatus.IMPLEMENTATION
         task.agent = name
-        tasks.save(self.folder(slug) / "tasks.md")
-        if note:
-            agent.note = note  # so you can see who started it, and why
-            self.chats.update(slug, agent)
+        self._save_tasks(slug, tasks)
+        agent.note = note  # so you can see who started it, and why
+        self.chats.update(slug, agent)
+        return name
 
-    def _check_prs(self, slug: str) -> None:
-        tasks = self.tasks(slug)
-        changed = False
-        for task in tasks.tasks:
-            if task.status is not TaskStatus.PENDING_REVIEW or not task.pr:
-                continue
-            state = self.pr_state(task.pr)
-            agent = self._agent(slug, task.agent) if task.agent else None
-            if state == "MERGED":
-                task.status = TaskStatus.MERGED
-                changed = True
-                set_goal_field(self.workspace, slug, "Last merged", task.pr)
-                set_goal_field(self.workspace, slug, "Next task asked", "no")
-                if self.conflict(slug) and self.conflict(slug)[1] == task.number:
-                    self._set_conflict(slug, "none")  # fixed on GitHub and merged
-                # A merge is what usually causes conflicts, so every project's
-                # open PRs (other projects may share the repo) get checked at
-                # their next tick.
-                for other in self.workspace.project_slugs():
-                    if other != slug:
-                        self._last_pr_check[other] = float("-inf")
-                if agent is not None and agent.status is not Status.STOPPED:
-                    self.chats.stop(slug, agent.name)
-            elif state == "CLOSED" and agent is not None:
-                agent.note = "PR was closed without merging. Tell the coordinator what to do."
-                self.chats.update(slug, agent)
-            elif state == "OPEN":
-                mergeable = self.pr_mergeable(task.pr)
-                handling = self.conflict(slug)
-                if mergeable == "CONFLICTING":
-                    self._on_conflict(slug, task)
-                elif mergeable == "MERGEABLE" and handling == ("asked", task.number):
-                    self._set_conflict(slug, "none")  # someone fixed it on GitHub
-        if changed:
-            tasks.save(self.folder(slug) / "tasks.md")
+    def _branch(self, slug: str, task: Task) -> str:
+        return f"jef/{slug}/task-{task.number}"
 
-    def _nudge(self, slug: str) -> None:
-        """Hourly check-in for implementers that haven't handed back a PR yet."""
-        tasks = {t.agent: t for t in self.tasks(slug).tasks if t.agent}
-        for agent in self.chats.refresh(slug):
-            task = tasks.get(agent.name)
-            if agent.role is not Role.IMPLEMENTER or agent.status is not Status.IDLE or task is None:
-                continue
-            if task.status is not TaskStatus.IMPLEMENTATION or agent.note.startswith("Stuck"):
-                continue  # done, or waiting on you
+    # -- the inbox: coordinators' ``jef project …`` requests
+
+    def process_inbox(self, slug: str) -> int:
+        """Carry out waiting requests, oldest first. Returns how many."""
+        done = 0
+        for request in inbox.pending(self.workspace, slug):
             try:
-                self.chats.send(slug, agent.name, self._nudge_message(task), sender="heartbeat")
-            except ChatError:
-                pass
+                ok, message = True, self._handle(slug, request)
+            except (PipelineError, ChatError, PublishError) as err:
+                ok, message = False, str(err)
+            except Exception as err:  # never leave a coordinator waiting on a crash
+                log.exception("Request %s failed in %s", request.summary, slug)
+                ok, message = False, f"Jef hit an error: {err}"
+            inbox.answer(self.workspace, slug, request.id, ok, message)
+            done += 1
+        return done
 
-    def _finish(self, slug: str) -> None:
-        set_goal_field(self.workspace, slug, "Done", "yes")
+    def _handle(self, slug: str, request: inbox.Request) -> str:
         project = load_project(self.workspace, slug)
-        number = goal_fields(self.workspace, slug).get("backlog item", "").lstrip("#")
-        backlog = Backlog.load(self.workspace.backlog_file)
-        for item in backlog.items:
-            if str(item.number) == number:
-                item.status = BacklogStatus.DONE
-        backlog.save(self.workspace.backlog_file)
-        try:
-            self.chats.stop(slug, project.coordinator_agent)
-        except ChatError:
-            pass
+        if project is None:
+            raise PipelineError("There's no such project.")
+        if request.sender != project.coordinator_agent:
+            raise PipelineError("Only the project's coordinator can ask Jef to do things.")
+        coordinator = self._agent(slug, project.coordinator_agent)
+        if coordinator is None or coordinator.status is Status.STOPPED:
+            raise PipelineError("This project's coordinator has stopped.")
+        by, args = project.coordinator, request.args
+
+        def number() -> int:
+            value = str(args.get("number", ""))
+            if not value.isdigit():
+                raise PipelineError("Give the task's number, like 2.")
+            return int(value)
+
+        handlers: dict[str, Callable[[], str]] = {
+            "research": lambda: self.start_research(slug, str(args.get("brief", "")), by=by),
+            "plan": lambda: self.plan(slug, [str(t) for t in args.get("titles", [])], by=by),
+            "approve": lambda: self.approve_tasks(slug, by=by),
+            "start": lambda: self.start_task(slug, number(), by=by),
+            "send": lambda: self.send_to(slug, str(args.get("agent", "")), str(args.get("message", "")), by=by),
+            "stop": lambda: self.stop_agent(slug, str(args.get("agent", "")), by=by),
+            "wait": lambda: self.wait_for_person(slug, str(args.get("reason", "")), by=by),
+            "publish": lambda: self.publish(slug, number(), str(args.get("note", "")), by=by),
+            "prs": lambda: self.check_prs(slug),
+        }
+        handler = handlers.get(request.command)
+        if handler is None:
+            raise PipelineError(f"Jef doesn't know the request {request.command!r}.")
+        return handler()
+
+    # -- the timer
+
+    def tick(self, slug: str) -> None:
+        """Re-read the project's files and wake the coordinator if it's due."""
+        with self.chats.lock:
+            project = load_project(self.workspace, slug)
+            if project is None:
+                return
+            agents = self.chats.refresh(slug)
+            phase = project_phase(self.workspace, slug, agents)
+            if phase is Phase.DONE:
+                for agent in agents:  # each once it has finished its turn
+                    if agent.status is Status.IDLE:
+                        self.chats.stop(slug, agent.name)
+                return
+            if phase is Phase.STOPPED:
+                return
+            over = self._budget_problem(slug)
+            if over:
+                # Paused: no new turns until the budget is raised.
+                if self.problem(slug) != over:
+                    set_goal_field(self.workspace, slug, "Problem", over)
+                return
+            self._save_research(slug, agents)
+            coordinator = next((a for a in agents if a.name == project.coordinator_agent), None)
+            if coordinator is None or coordinator.status is not Status.IDLE:
+                return  # it's busy (with you or a heartbeat); wake it later
+            now = self.now()
+            last = self._last_wake.setdefault(slug, now)  # after a restart, wait a full interval
+            finished = []
+            for agent in agents:
+                if agent.parent == coordinator.name and agent.status is Status.IDLE:
+                    count = len(self.chats.replies(slug, agent.name))
+                    if count > agent.handled:
+                        finished.append((agent, count))
+            news = self._events.get(slug, [])
+            due = (
+                now - last >= self.heartbeat_minutes(slug) * 60
+                and not self.problem(slug)
+                and (phase in (Phase.PLANNING, Phase.BUILDING) or (phase is Phase.APPROVAL and self.coordinator_decides(slug)))
+            )
+            if not (finished or news or due):
+                return
+            message = self._wake_message(slug, agents, [a for a, _ in finished], news, now - last)
+            try:
+                self.chats.send(slug, coordinator.name, message, sender="heartbeat")
+            except ChatError as err:
+                coordinator.note = "Couldn't wake it: " + _short(str(err))
+                self.chats.update(slug, coordinator)
+                return
+            self._last_wake[slug] = now
+            self._events.pop(slug, None)
+            for agent, count in finished:
+                agent.handled = count
+                self.chats.update(slug, agent)
+
+    def _save_research(self, slug: str, agents: list[Agent]) -> None:
+        """The research agent's reply becomes research.md."""
+        if goal_fields(self.workspace, slug).get("research", "").lower() != "started":
+            return
+        agent = next((a for a in agents if a.name == RESEARCH_AGENT), None)
+        if agent is None or agent.status is Status.WORKING:
+            return
+        replies = [r for r in self.chats.replies(slug, agent.name) if not r.is_error and r.text.strip()]
+        if not replies:
+            return
+        (self.folder(slug) / "research.md").write_text(replies[-1].text.strip() + "\n", encoding="utf-8")
+        set_goal_field(self.workspace, slug, "Research", "done")
+        agent.note = "Findings written to research.md"
+        self.chats.update(slug, agent)
 
     # -- what agents are told
+
+    def _task_lines(self, tasks: TaskList) -> str:
+        return "\n".join(f"{t.number}. {t.title} ({t.status.value})" for t in tasks.tasks)
+
+    def _wake_message(self, slug: str, agents: list[Agent], finished: list[Agent], news: list[str], since: float) -> str:
+        lines = [f"- {item}" for item in news]
+        for agent in finished:
+            if agent.name == RESEARCH_AGENT:
+                lines.append("- The research agent finished. Its findings are saved as research.md; read that file.")
+            else:
+                lines.append(f"- {agent.name} finished a turn. Read its reply with `jef project read {agent.name}`.")
+        minutes = max(1, round(since / 60))
+        head = (
+            "Jef: news from your project.\n\n" + "\n".join(lines)
+            if lines
+            else f"Heartbeat: it's been about {minutes} minutes since your last check."
+        )
+        return (
+            f"{head}\n\n## Project status\n\n{render_status(self.workspace, slug, agents)}\n"
+            "Go through your heartbeat checklist and act with `jef project` commands. "
+            "End with a short note for the person: what you did and what happens next."
+        )
 
     def _goal(self, slug: str) -> str:
         return (self.folder(slug) / "goal.md").read_text(encoding="utf-8")
@@ -880,133 +740,48 @@ class Pipeline:
         ]
         return _tail("\n\n".join(lines))
 
-    def _research_message(self, slug: str) -> str:
+    def _research_message(self, slug: str, brief: str = "") -> str:
+        project = load_project(self.workspace, slug)
         return (
             "You're the research agent for this project. Your working folder is a clone of its repo.\n\n"
-            f"## goal.md\n\n{self._goal(slug)}\n"
+            + (f"## What {project.coordinator} wants you to look into\n\n{brief.strip()}\n\n" if brief.strip() else "")
+            + f"## goal.md\n\n{self._goal(slug)}\n"
             "## The conversation so far between the person and the coordinator\n\n"
             f"{self._conversation(slug)}\n\n"
             "Follow your research instructions. Your final reply becomes research.md, so make it the "
             "complete findings in the format your instructions give."
         )
 
-    def _planning_message(self, slug: str) -> str:
-        return (
-            "The research agent has finished. Its findings, now saved as research.md:\n\n"
-            f"{_tail(self.research(slug))}\n\n"
-            "Turn this into tasks, following your planning instructions: a short note for the person, "
-            "then the numbered task list inside a ```tasks block."
-        )
-
-    def _decision_message(self, slug: str, now: float) -> str:
-        waited = max(1, round((now - self._last_beat[slug]) / 60))
-        return (
-            f"Heartbeat: the task list has waited about {waited} minutes without being approved. "
-            "Please decide on it now.\n\n"
-            "## The tasks waiting for approval\n\n"
-            + "\n".join(f"{t.number}. {t.title}" for t in self.tasks(slug).tasks)
-            + "\n\n"
-            "Choose one:\n"
-            "- If the list is good, reply with a one-line reason and end with `ACTION: approve-tasks` "
-            "on its own line. Jef then starts building.\n"
-            "- If it needs changes, reply with the whole updated list in a ```tasks block. "
-            "Don't approve in the same reply; the new list waits for approval again.\n"
-            "- If you really need the person's answer first (they asked for changes or a question is "
-            "still open), ask it and don't approve. You'll be asked again at the next heartbeat."
-        )
-
-    def _next_task_message(self, slug: str) -> str:
-        merged = goal_fields(self.workspace, slug).get("last merged", "")
-        tasks = self.tasks(slug).tasks
-        task = next((t for t in tasks if t.pr == merged), None)
-        what = (f"{pr_label(merged)} ({merged})" if merged else "The last task's PR") + (
-            f" for task {task.number}, {task.title}," if task else ""
-        )
-        base = self.git.default_branch(self.folder(slug) / "repo")
-        return (
-            f"{what} has been merged into `{base}`. Jef has fetched it, so `git log origin/{base}` "
-            f"in your folder shows it, and `gh pr view {merged}` shows what it changed.\n\n"
-            "## The tasks now\n\n"
-            + "\n".join(f"{t.number}. {t.title} ({t.status.value})" for t in tasks)
-            + "\n\n"
-            "Decide what happens next. Choose one:\n"
-            "- If the next task still makes sense as written, reply with a one-line reason and end "
-            "with `ACTION: start-task <number>` on its own line. Jef then starts it.\n"
-            "- If the tasks that haven't started need changing (reworded, split, dropped or added "
-            "because of what merged), reply with them in a ```tasks block, numbered after the tasks "
-            "that have started, then end with `ACTION: start-task <number>`.\n"
-            "- If you need the person's answer first, ask it and end with `ACTION: wait <reason>`. "
-            "Jef shows the reason on the project page and starts nothing."
-        )
-
-    def _conflict_message(self, slug: str, task: Task) -> str:
-        merged = goal_fields(self.workspace, slug).get("last merged", "")
-        base = self.git.default_branch(self.folder(slug) / "repo")
-        return (
-            f"{pr_label(task.pr)} ({task.pr}) for task {task.number}, {task.title}, can't be merged any more: "
-            f"it has conflicts with the latest `{base}`"
-            + (f", probably because {pr_label(merged)} ({merged}) was merged" if merged else "")
-            + f". Look at both with `gh pr view` and `git log origin/{base}`, then choose one:\n"
-            f"- To have the implementer rebase it on `{base}`, keeping what both sides meant, end with "
-            f"`ACTION: fix-conflict {task.number}`. Jef pushes the fix to the same PR.\n"
-            "- If the two changes really disagree and the person has to choose, explain the choice and "
-            "end with `ACTION: wait <reason>`."
-        )
-
-    def _conflict_fix_message(self, slug: str, task: Task) -> str:
-        base = self.git.default_branch(self.folder(slug) / "repo")
-        return (
-            f"Your PR {task.pr} can't be merged: other work merged into `{base}` since you started, "
-            f"and it conflicts with your branch. Fix it on your branch, one command at a time:\n\n"
-            "1. `git fetch origin`\n"
-            f"2. `git rebase origin/{base}`\n"
-            "3. For each conflicted file, edit it so both sides' changes still do what they meant, then "
-            "`git add <file>` and `git -c core.editor=true rebase --continue`.\n"
-            "4. Run the tests.\n\n"
-            "Then report `STATUS: ready` with your ```pr block (same title; say under Testing that you "
-            "rebased and fixed conflicts). Jef pushes your branch to the same PR. If both sides can't be "
-            "kept, run `git rebase --abort` and report `STATUS: stuck` with the decision that's needed."
-        )
-
-    def _next_task_reminder(self) -> str:
-        return (
-            "Heartbeat: Jef is still waiting for you to say which task starts next. End your reply with "
-            "`ACTION: start-task <number>` or `ACTION: wait <reason>`. If there's no answer by the next "
-            "heartbeat, Jef stops and asks the person."
-        )
-
     def _implementer_message(self, slug: str, task: Task, branch: str, base: str) -> str:
+        project = load_project(self.workspace, slug)
         return (
             f"You're the implementation agent for task {task.number}: {task.title}\n\n"
             f"Your working folder is a checkout of the repo on your own branch, `{branch}`, "
-            f"made from the latest `{base}`.\n\n"
+            f"made from the latest `{base}`. Your coordinator is {project.coordinator}.\n\n"
             f"## goal.md\n\n{self._goal(slug)}\n"
             f"## research.md\n\n{_tail(self.research(slug))}\n\n"
             "## All tasks, so you know what's yours and what isn't\n\n"
             + "\n".join(f"{t.number}. {t.title}" for t in self.tasks(slug).tasks)
             + "\n\n"
-            "When it's done and tested, commit it and report `STATUS: ready` with a ```pr block. "
-            "Don't push or open the PR yourself: Jef checks your commits for secrets, pushes your "
-            "branch and opens the PR. Follow your implementer instructions, and end every reply "
-            "with one STATUS line."
-        )
-
-    def _nudge_message(self, task: Task) -> str:
-        return (
-            f"Heartbeat check-in for task {task.number}: {task.title}.\n"
-            "Carry on from where you left off. When everything is committed and tested, report "
-            "`STATUS: ready` with a ```pr block. End your reply with one STATUS line."
+            "When it's done and tested, commit it and end your reply with a ```pr block and "
+            "`STATUS: ready`. Don't push or open the PR yourself: your coordinator reads your reply "
+            "and has Jef check your commits for secrets, push your branch and open the PR. Follow "
+            "your implementer instructions, and end every reply with one STATUS line."
         )
 
 
 class Heartbeat:
-    """Ticks every project's pipeline in a background thread while Jef runs."""
+    """Jef's timer, in a background thread while Jef runs: it carries out
+    coordinators' requests every couple of seconds, and every half minute
+    re-reads each project and wakes coordinators that are due."""
 
-    def __init__(self, pipeline: Pipeline, every: float = TICK_SECONDS):
+    def __init__(self, pipeline: Pipeline, every: float = INBOX_SECONDS, tick_every: float = TICK_SECONDS):
         self.pipeline = pipeline
         self.every = every
+        self.tick_every = tick_every
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="jef-heartbeat", daemon=True)
+        self._last_tick = 0.0
 
     def start(self) -> None:
         self._thread.start()
@@ -1015,7 +790,16 @@ class Heartbeat:
         self._stop.set()
         self._thread.join(timeout=5)
 
+    def inbox_all(self) -> None:
+        inbox.mark_alive(self.pipeline.workspace)
+        for slug in self.pipeline.workspace.project_slugs():
+            try:
+                self.pipeline.process_inbox(slug)
+            except Exception:
+                log.exception("Couldn't read the inbox for project %s", slug)
+
     def tick_all(self) -> None:
+        self.inbox_all()
         for slug in self.pipeline.workspace.project_slugs():
             try:
                 self.pipeline.tick(slug)
@@ -1029,4 +813,8 @@ class Heartbeat:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.every):
-            self.tick_all()
+            if time.monotonic() - self._last_tick >= self.tick_every:
+                self._last_tick = time.monotonic()
+                self.tick_all()
+            else:
+                self.inbox_all()

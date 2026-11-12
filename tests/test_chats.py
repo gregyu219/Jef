@@ -158,3 +158,10 @@ def test_transcript_reads_claude_code_stream_events(setup):
         f.write("not json\n")
     kinds = [(l.kind, l.text) for l in chats.transcript("todo", "impl-1")]
     assert kinds == [("sent", "you: Build"), ("text", "Running the tests."), ("tool", "Bash pytest -q"), ("result", "Turn finished.")]
+
+
+def test_pushing_is_refused_even_with_git_options_first():
+    from jef.chats import ALWAYS_DENIED
+
+    for rule in ("Bash(git push*)", "Bash(git -C * push*)", "Bash(git -c * push*)"):
+        assert rule in ALWAYS_DENIED

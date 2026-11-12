@@ -24,7 +24,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -32,7 +34,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from jef import mdtable
+from jef import mdtable, skills
 from jef.workspace import Workspace
 
 HEADERS = ["Name", "Role", "Parent", "Status", "Handled", "Note", "Session", "Folder"]
@@ -56,6 +58,11 @@ ALWAYS_DENIED = [
     "Bash(git push * HEAD:main)",
     "Bash(git push --force*)",
     "Bash(git push -f*)",
+    # The same, with git's options before the command (git -C <folder> push).
+    "Bash(git -C * push*)",
+    "Bash(git -c * push*)",
+    "Bash(git --git-dir* push*)",
+    "Bash(git --work-tree* push*)",
 ]
 
 
@@ -73,14 +80,38 @@ class RolePolicy:
 
     allowed_tools: list[str]
     model: str = ""  # empty: Claude Code's default
+    denied: tuple[str, ...] = ()  # refused for this role, on top of ALWAYS_DENIED
+
+
+# Only coordinators may run Jef's own commands; everyone else is refused them,
+# even from a repo that has Jef installed in its .venv. (They'd fail anyway:
+# only a coordinator's turn has JEF_PROJECT set, and Jef checks who asked.)
+NO_JEF_COMMANDS = ("Bash(jef *)", "Bash(.venv/bin/jef *)")
 
 
 READ_ONLY = ["Read", "Glob", "Grep"]
 POLICIES: dict[Role, RolePolicy] = {
-    Role.COORDINATOR: RolePolicy(READ_ONLY + ["Bash(gh pr view *)", "Bash(gh pr list *)", "Bash(git log *)"]),
-    Role.RESEARCH: RolePolicy(READ_ONLY + ["WebSearch", "WebFetch", "Bash(git log *)"]),
+    # The coordinator runs its project through ``jef project …`` (Jef carries
+    # each request out), and reads the repo and its PRs. It can't change code.
+    Role.COORDINATOR: RolePolicy(
+        READ_ONLY
+        + [
+            "Bash(jef project *)",
+            "Bash(gh pr view *)",
+            "Bash(gh pr list *)",
+            "Bash(gh pr diff *)",
+            "Bash(gh pr checks *)",
+            "Bash(git log *)",
+            "Bash(git show *)",
+            "Bash(git diff *)",
+            "Bash(git fetch *)",
+            "Bash(git fetch)",
+            "Bash(git status)",
+        ]
+    ),
+    Role.RESEARCH: RolePolicy(READ_ONLY + ["WebSearch", "WebFetch", "Bash(git log *)"], denied=NO_JEF_COMMANDS),
     # Jef's own chat isn't in a repo: it only reads the workspace files.
-    Role.JEF: RolePolicy(READ_ONLY),
+    Role.JEF: RolePolicy(READ_ONLY, denied=NO_JEF_COMMANDS),
     Role.IMPLEMENTER: RolePolicy(
         READ_ONLY
         + [
@@ -105,9 +136,23 @@ POLICIES: dict[Role, RolePolicy] = {
             "Bash(test *)",
             "Bash(ls *)",
             "Bash(mkdir *)",
-        ]
+        ],
+        denied=NO_JEF_COMMANDS,
     ),
 }
+
+# Each role's skill, sent with every turn: Claude Code doesn't keep
+# --append-system-prompt from one run of a session to the next.
+SKILLS = {Role.COORDINATOR: "coordinator", Role.RESEARCH: "research", Role.IMPLEMENTER: "implementer", Role.JEF: "jef"}
+
+
+def jef_bin_dir() -> str:
+    """The folder holding the ``jef`` command, so coordinators can run it."""
+    here = Path(sys.executable).parent
+    if (here / "jef").exists():
+        return str(here)
+    found = shutil.which("jef")
+    return str(Path(found).parent) if found else ""
 
 
 class Status(str, Enum):
@@ -238,16 +283,32 @@ class Chats:
             cmd += ["--resume", agent.session]
         cmd += ["--permission-mode", "acceptEdits", "--permission-prompts", "none"]
         cmd += ["--allowedTools", *policy.allowed_tools]
-        cmd += ["--disallowedTools", *ALWAYS_DENIED]
+        cmd += ["--disallowedTools", *ALWAYS_DENIED, *policy.denied]
         if policy.model:
             cmd += ["--model", policy.model]
         if budget_left is not None:
             # Claude Code stops this one run once it has spent what's left. It
             # doesn't count earlier runs, which is why Jef passes the remainder.
             cmd += ["--max-budget-usd", f"{max(budget_left, 0.01):.2f}"]
+        instructions = instructions or skills.load(SKILLS[agent.role])
         if instructions:
             cmd += ["--append-system-prompt", instructions]
         return cmd
+
+    def agent_env(self, project: str, agent: Agent) -> dict[str, str]:
+        """The environment an agent's turn runs in."""
+        env = {**os.environ, **AGENT_ENV}
+        for key in ("JEF_PROJECT", "JEF_AGENT"):
+            env.pop(key, None)  # only coordinators get these
+        if agent.role is Role.COORDINATOR:
+            # ``jef project …`` reads these to know whose request it is.
+            env["JEF_HOME"] = str(self.workspace.root)
+            env["JEF_PROJECT"] = project
+            env["JEF_AGENT"] = agent.name
+            bin_dir = jef_bin_dir()
+            if bin_dir:
+                env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        return env
 
     def _run_turn(
         self,
@@ -273,7 +334,7 @@ class Chats:
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
-                env={**os.environ, **AGENT_ENV},
+                env=self.agent_env(project, agent),
                 start_new_session=True,  # so stopping Jef's terminal doesn't kill agents mid-turn
             )
         self._running[(project, agent.name)] = proc
