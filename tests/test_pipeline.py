@@ -675,6 +675,29 @@ def test_web_buttons(w):
     assert "between 5 minutes" in c.post(f"/projects/{w.slug}/heartbeat", data={"minutes": "2"}).text
 
 
+def test_web_implementers_form(w):
+    c = client(w)
+    page = c.get(f"/projects/{w.slug}").text
+    assert 'action="/projects/{}/implementers"'.format(w.slug) in page
+    assert 'name="count" value="1"' in page and "Build up to" in page
+    c.post(f"/projects/{w.slug}/implementers", data={"count": "3"})
+    assert w.pipeline.implementers_at_once(w.slug) == 3
+    assert 'name="count" value="3"' in c.get(f"/projects/{w.slug}").text
+    assert "Type a number of tasks" in c.post(f"/projects/{w.slug}/implementers", data={"count": "lots"}).text
+    assert "between 1 and 5" in c.post(f"/projects/{w.slug}/implementers", data={"count": "0"}).text
+    assert "between 1 and 5" in c.post(f"/projects/{w.slug}/implementers", data={"count": "6"}).text
+    assert w.pipeline.implementers_at_once(w.slug) == 3
+
+
+def test_web_page_text_follows_implementers_at_once(w):
+    c = client(w)
+    building(w)
+    assert "starts the next task." in c.get(f"/projects/{w.slug}").text
+    w.pipeline.set_implementers_at_once(w.slug, 2)
+    page = c.get(f"/projects/{w.slug}").text
+    assert "whichever tasks are ready, up to 2 at once" in page
+
+
 def test_web_wake_button(w):
     c = client(w)
     building(w)
