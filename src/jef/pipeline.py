@@ -6,7 +6,8 @@ project's files, so there's no hidden state:
     Understanding  you and the coordinator talk until you say go
     Research       a research agent studies the repo and writes research.md
     Planning       the coordinator turns research.md into tasks.md
-    Approval       you look at the tasks and approve them (or ask for changes)
+    Approval       you look at the tasks and approve them (or ask for changes);
+                   if you haven't by the next heartbeat, the coordinator decides
     Building       one implementer per task, each on its own branch, opens a PR
     Done           every task's PR is merged
 
@@ -20,6 +21,7 @@ Agents only reply in text. Jef reads a few plain markers in those replies:
 
 - the coordinator ends with ``ACTION: start-research`` when you say go,
 - the coordinator puts the task list in a fenced ``tasks`` block,
+- the coordinator ends with ``ACTION: approve-tasks`` to approve a waiting list,
 - implementers end with ``STATUS: working | ready | stuck <reason>``; with ``ready``
   they include a ``pr`` block, and Jef pushes the branch and opens the PR itself.
 
@@ -63,6 +65,7 @@ IMPLEMENTERS_AT_ONCE = 1
 MAX_CONTEXT_CHARS = 30_000
 
 ACTION_START_RESEARCH = re.compile(r"^\s*ACTION:\s*start-research\s*$", re.I | re.M)
+ACTION_APPROVE_TASKS = re.compile(r"^\s*ACTION:\s*approve-tasks\s*$", re.I | re.M)
 TASKS_BLOCK = re.compile(r"```tasks\s*\n(.*?)```", re.S | re.I)
 TASK_LINE = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
 STATUS_LINE = re.compile(r"^\s*STATUS:\s*(working|ready|pr-opened|stuck)\b(.*)$", re.I | re.M)
@@ -124,6 +127,7 @@ def parse_status(text: str) -> tuple[str, str] | None:
 
 def without_markers(text: str) -> str:
     text = STATUS_LINE.sub("", text)
+    text = ACTION_APPROVE_TASKS.sub("", text)
     return ACTION_START_RESEARCH.sub("", text).strip()
 
 
@@ -279,6 +283,8 @@ class Pipeline:
             phase = self.phase(slug)
             if phase is Phase.PLANNING:
                 self._ask_for_tasks(slug)
+            if phase is Phase.APPROVAL:
+                self._ask_for_decision(slug)
             if phase is Phase.BUILDING:
                 now = self.now()
                 if now - self._last_pr_check.get(slug, 0) >= PR_CHECK_SECONDS:
@@ -326,6 +332,14 @@ class Pipeline:
                 tasks.tasks = [Task(i, title) for i, title in enumerate(titles, start=1)]
                 tasks.save(self.folder(slug) / "tasks.md")
                 agent.note = f"Proposed {len(titles)} tasks"
+                # You get a full heartbeat to approve by hand before the
+                # coordinator is asked; a revised list restarts the wait.
+                self._last_beat[slug] = self.now()
+            elif ACTION_APPROVE_TASKS.search(reply.text) and phase is Phase.APPROVAL:
+                # The phase is from before this reply, so a list proposed and
+                # approved in one go is never approved: it waits at least once.
+                self.approve_tasks(slug)
+                agent.note = "Approved the tasks"
         elif agent.role is Role.RESEARCH:
             findings = without_markers(reply.text)
             if findings and goal_fields(self.workspace, slug).get("research", "").lower() == "started":
@@ -399,6 +413,24 @@ class Pipeline:
             return  # busy talking to you; ask on a later tick
         self.chats.send(slug, coordinator.name, self._planning_message(slug), sender="jef")
         set_goal_field(self.workspace, slug, "Planning requested", "yes")
+
+    def _ask_for_decision(self, slug: str) -> None:
+        """Once per heartbeat while the tasks wait, ask the coordinator to decide."""
+        now = self.now()
+        # After a restart, wait a full interval rather than asking at once.
+        self._last_beat.setdefault(slug, now)
+        minutes = self.heartbeat_minutes(slug)
+        if now - self._last_beat[slug] < minutes * 60:
+            return
+        project = load_project(self.workspace, slug)
+        coordinator = self._agent(slug, project.coordinator_agent)
+        if coordinator is None or coordinator.status is not Status.IDLE:
+            return  # busy talking to you; ask on a later tick
+        try:
+            self.chats.send(slug, coordinator.name, self._decision_message(slug, now), sender="heartbeat")
+        except ChatError:
+            return
+        self._last_beat[slug] = now
 
     def problem(self, slug: str) -> str:
         """Something that stopped the pipeline and needs you, or ""."""
@@ -527,6 +559,23 @@ class Pipeline:
             f"{_tail(self.research(slug))}\n\n"
             "Turn this into tasks, following your planning instructions: a short note for the person, "
             "then the numbered task list inside a ```tasks block."
+        )
+
+    def _decision_message(self, slug: str, now: float) -> str:
+        waited = max(1, round((now - self._last_beat[slug]) / 60))
+        return (
+            f"Heartbeat: the task list has waited about {waited} minutes without being approved. "
+            "Please decide on it now.\n\n"
+            "## The tasks waiting for approval\n\n"
+            + "\n".join(f"{t.number}. {t.title}" for t in self.tasks(slug).tasks)
+            + "\n\n"
+            "Choose one:\n"
+            "- If the list is good, reply with a one-line reason and end with `ACTION: approve-tasks` "
+            "on its own line. Jef then starts building.\n"
+            "- If it needs changes, reply with the whole updated list in a ```tasks block. "
+            "Don't approve in the same reply; the new list waits for approval again.\n"
+            "- If you really need the person's answer first (they asked for changes or a question is "
+            "still open), ask it and don't approve. You'll be asked again at the next heartbeat."
         )
 
     def _implementer_message(self, slug: str, task: Task, branch: str, base: str) -> str:

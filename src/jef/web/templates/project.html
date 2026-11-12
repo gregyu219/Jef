@@ -25,7 +25,7 @@
     {% elif phase == phases.PLANNING %}
     <p class="next">{{ project.coordinator }} is turning the research into tasks.</p>
     {% elif phase == phases.APPROVAL %}
-    <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them. Each task becomes one PR, {{ at_once }} at a time: the next starts after you merge the last.</p>
+    <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them. If you don't, {{ project.coordinator }} will decide at the next heartbeat (every {{ heartbeat }} minutes). Each task becomes one PR, {{ at_once }} at a time: the next starts after you merge the last.</p>
     <form method="post" action="/projects/{{ project.slug }}/approve"><button type="submit">Approve tasks and start building</button></form>
     {% elif phase == phases.BUILDING %}
     <p class="next">Implementers are building. Review and merge each PR on GitHub; Jef notices merges within five minutes and starts the next task, or press Check status now.</p>
