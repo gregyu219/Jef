@@ -82,13 +82,15 @@ class Backlog:
         return item
 
     def remove(self, number: int) -> BacklogItem:
-        """Remove a Waiting item. Started or finished items have a project
-        pointing at their number, so they can't be removed."""
+        """Remove a Waiting or Done item. In progress items have a project
+        still working on them, so they can't be removed. A Done item's project
+        keeps its number, and `add` never hands that number out again as
+        long as it is passed as reserved."""
         item = next((i for i in self.items if i.number == number), None)
         if item is None:
             raise ValueError(f"There is no backlog item #{number}.")
-        if item.status != BacklogStatus.WAITING:
-            raise ValueError(f"Backlog item #{number} has started, so it can't be deleted.")
+        if item.status == BacklogStatus.IN_PROGRESS:
+            raise ValueError(f"Backlog item #{number} is still in progress, so it can't be deleted.")
         self.items.remove(item)
         return item
 

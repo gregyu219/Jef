@@ -51,14 +51,28 @@ def test_removing_a_waiting_item_leaves_the_rest_unchanged(tmp_path):
     assert path.read_text() == BACKLOG.replace("| 2 | Dark mode for the to-do app | Waiting | |\n", "")
 
 
-@pytest.mark.parametrize("number", [1, 99])
-def test_started_or_missing_items_cannot_be_removed(tmp_path, number):
+WITH_DONE = BACKLOG + "| 3 | Weekly email summary | Done | Bea |\n"
+
+
+def test_removing_a_done_item_leaves_the_rest_unchanged(tmp_path):
     path = tmp_path / "backlog.md"
-    path.write_text(BACKLOG)
+    path.write_text(WITH_DONE)
     backlog = Backlog.load(path)
-    with pytest.raises(ValueError):
+    removed = backlog.remove(3)
+    assert removed.feature == "Weekly email summary"
+    assert removed.coordinator == "Bea"
+    backlog.save(path)
+    assert path.read_text() == BACKLOG
+
+
+@pytest.mark.parametrize("number", [1, 99])
+def test_in_progress_or_missing_items_cannot_be_removed(tmp_path, number):
+    path = tmp_path / "backlog.md"
+    path.write_text(WITH_DONE)
+    backlog = Backlog.load(path)
+    with pytest.raises(ValueError, match="in progress" if number == 1 else "no backlog item"):
         backlog.remove(number)
-    assert backlog.render() == BACKLOG
+    assert backlog.render() == WITH_DONE
 
 
 def test_new_backlog_items_start_waiting_with_the_next_number(tmp_path):

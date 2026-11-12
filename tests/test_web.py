@@ -64,13 +64,27 @@ STARTED_AND_WAITING = """# Backlog
 | 2 | Dark mode | Waiting | |
 """
 
+WITH_DONE = STARTED_AND_WAITING + "| 3 | Weekly email summary | Done | Bea |\n"
 
-def test_home_page_shows_delete_only_for_waiting_items(ws, client):
+
+def test_home_page_shows_delete_for_waiting_and_done_items_only(ws, client):
     ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
-    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    ws.backlog_file.write_text(WITH_DONE)
     page = client.get("/")
     assert 'action="/backlog/2/delete"' in page.text
+    assert 'action="/backlog/3/delete"' in page.text
     assert 'action="/backlog/1/delete"' not in page.text
+    assert "Its project and PRs stay." in page.text
+
+
+def test_deleting_a_done_item_removes_it(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(WITH_DONE)
+    response = client.post("/backlog/3/delete", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    assert ws.backlog_file.read_text() == STARTED_AND_WAITING
+    assert "Weekly email summary" not in client.get("/").text
 
 
 def test_deleting_a_waiting_item_removes_it(ws, client):
@@ -90,7 +104,7 @@ def test_deleting_a_started_item_is_refused(ws, client):
     assert response.status_code == 303
     assert response.headers["location"] == "/?error=delete"
     assert ws.backlog_file.read_text() == STARTED_AND_WAITING
-    assert "can't be deleted" in client.get("/?error=delete").text
+    assert "can't be deleted while it's in progress" in client.get("/?error=delete").text
 
 
 def test_delete_confirmation_text_cannot_break_out_of_the_script(client):

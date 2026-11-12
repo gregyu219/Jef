@@ -139,6 +139,7 @@ def create_app(
                 "claude": app.state.claude,
                 "coordinator_pages": coordinator_pages(),
                 "waiting": BacklogStatus.WAITING,
+                "done": BacklogStatus.DONE,
                 "error": error,
             },
         )
