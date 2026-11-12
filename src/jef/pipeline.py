@@ -3,7 +3,8 @@
 **The coordinator runs its project.** It talks with you, starts research,
 plans the tasks, starts implementers one at a time, nudges them, checks their
 PRs on GitHub (merged? conflicts?) and sends work back. It does all of that
-with ``jef project …`` commands (see ``jef.coordinate``), which Jef carries out
+with its own ``jef`` commands (``jef task start 1``, ``jef prs check``; see
+``jef.coordinate``), which Jef carries out
 from its inbox (``jef.inbox``). Jef doesn't decide anything itself.
 
 **Jef only keeps time and keeps the rules.** While it runs, it:
@@ -154,7 +155,7 @@ def gh_pr_mergeable(url: str) -> str:
     return _gh_field(url, "mergeable")
 
 
-# ---- reading agents' replies (also used by ``jef project read``)
+# ---- reading agents' replies (also used by ``jef agent read``)
 
 
 def last_reply(ws: Workspace, slug: str, name: str) -> str:
@@ -382,7 +383,7 @@ class Pipeline:
             if phase in (Phase.DONE, Phase.STOPPED):
                 raise PipelineError("This project is finished.")
             if not titles and phase is not Phase.BUILDING:
-                raise PipelineError('Give at least one task, like: jef project plan "Show the version in the footer"')
+                raise PipelineError('Give at least one task, like: jef tasks set "Show the version in the footer"')
             tasks = self.tasks(slug)
             if phase is Phase.BUILDING:
                 kept = [t for t in tasks.tasks if t.status is not TaskStatus.NOT_STARTED]
@@ -415,9 +416,9 @@ class Pipeline:
                     )
             set_goal_field(self.workspace, slug, "Tasks approved", "yes")
             if by == "you":
-                self._tell_coordinator(slug, "The person approved the tasks. Start the first one with `jef project start 1`.")
+                self._tell_coordinator(slug, "The person approved the tasks. Start the first one with `jef task start 1`.")
             self.write_status(slug)
-            return "The tasks are approved. Start the first with `jef project start 1`."
+            return "The tasks are approved. Start the first with `jef task start 1`."
 
     def start_task(self, slug: str, number: int, by: str) -> str:
         with self.chats.lock:
@@ -429,7 +430,7 @@ class Pipeline:
             tasks = self.tasks(slug)
             task = next((t for t in tasks.tasks if t.number == number), None)
             if task is None:
-                raise PipelineError(f"There's no task {number}. See `jef project status`.")
+                raise PipelineError(f"There's no task {number}. See `jef overview`.")
             if task.status is not TaskStatus.NOT_STARTED:
                 raise PipelineError(f"Task {number} has already started ({task.status.value}).")
             busy = [t for t in tasks.tasks if t.status in IN_FLIGHT]
@@ -456,7 +457,7 @@ class Pipeline:
             project = load_project(self.workspace, slug)
             agent = self._agent(slug, name)
             if agent is None or agent.parent != project.coordinator_agent:
-                raise PipelineError(f"{name!r} isn't one of your agents. See `jef project status`.")
+                raise PipelineError(f"{name!r} isn't one of your agents. See `jef overview`.")
             self.chats.send(slug, name, message.strip(), sender=by)
             return f"Sent to {name}. Jef wakes you when it finishes the turn."
 
@@ -600,7 +601,7 @@ class Pipeline:
     def _branch(self, slug: str, task: Task) -> str:
         return f"jef/{slug}/task-{task.number}"
 
-    # -- the inbox: coordinators' ``jef project …`` requests
+    # -- the inbox: coordinators' requests
 
     def process_inbox(self, slug: str) -> int:
         """Carry out waiting requests, oldest first. Returns how many."""
@@ -732,7 +733,7 @@ class Pipeline:
             if agent.name == RESEARCH_AGENT:
                 lines.append("- The research agent finished. Its findings are saved as research.md; read that file.")
             else:
-                lines.append(f"- {agent.name} finished a turn. Read its reply with `jef project read {agent.name}`.")
+                lines.append(f"- {agent.name} finished a turn. Read its reply with `jef agent read {agent.name}`.")
         minutes = max(1, round(since / 60))
         head = (
             "Jef: news from your project.\n\n" + "\n".join(lines)
@@ -741,7 +742,7 @@ class Pipeline:
         )
         return (
             f"{head}\n\n## Project status\n\n{render_status(self.workspace, slug, agents)}\n"
-            "Go through your heartbeat checklist and act with `jef project` commands. "
+            "Go through your heartbeat checklist and act with your `jef` commands. "
             "End with a short note for the person: what you did and what happens next."
         )
 

@@ -56,7 +56,7 @@ Jef has four levels. Each one hands work to the level below it and keeps track o
 | Level | You talk to it about | It spins up | It keeps track of |
 | --- | --- | --- | --- |
 | **Jef** (the main UI) | Features you want, and when to start them | One coordinator per project, only after you confirm | Your backlog, plus each project's coordinator, GitHub repo and progress |
-| **Project coordinator** | Requirements, and PRs that miss the point | One research agent per project, then one implementation agent per task, through `jef project` commands | `goal.md`, `tasks.md`, each task's status, its implementers and their PRs |
+| **Project coordinator** | Requirements, and PRs that miss the point | One research agent per project, then one implementation agent per task, through its own `jef` commands | `goal.md`, `tasks.md`, each task's status, its implementers and their PRs |
 | **Research agent** | Nothing directly; it reports to its coordinator | Nobody | The project's findings and proposed approach |
 | **Implementation agent** | Nothing directly; it reports to its coordinator | Nobody | Its branch, its code changes and its PR |
 
@@ -80,21 +80,21 @@ Every task in a project's status table is in one of five states:
 
 **The coordinator runs its project; Jef only keeps time and keeps the rules.**
 
-A coordinator acts with `jef project` commands, which only work inside a coordinator's turn (Jef sets `JEF_PROJECT` and `JEF_AGENT` for coordinators and nobody else, and only coordinators may run `jef`):
+A coordinator acts with its own `jef` commands, grouped by what they act on. They only work inside a coordinator's turn (Jef sets `JEF_PROJECT` and `JEF_AGENT` for coordinators and nobody else, and only coordinators may run `jef`):
 
 | Command | What it does |
 | --- | --- |
-| `jef project status` | The project at a glance (reads the files) |
-| `jef project read impl-2` | An agent's latest reply (reads the chat) |
-| `jef project research ["brief"]` | Starts the research agent |
-| `jef project plan "Task" "Task" …` | Sets the task list. While building, it replaces only the tasks that haven't started |
-| `jef project approve` | Approves the list, only after it has waited a heartbeat for you and only if that's allowed for the project |
-| `jef project start N` | Starts task N's implementer, if no other task is still unmerged |
-| `jef project send impl-2 "…"` | Messages one of its own agents |
-| `jef project publish N [--note …]` | Jef checks the commits for secrets, pushes the branch and opens the PR, or updates the open one (with the note as a comment) |
-| `jef project prs` | Asks GitHub about every PR: merged (recorded, implementer stopped), conflicts, closed |
-| `jef project wait "…"` | Shows you on the project page that it's waiting for you |
-| `jef project stop impl-2` | Stops one of its own agents |
+| `jef overview` | The project at a glance (reads the files) |
+| `jef agent read impl-2` | An agent's latest reply (reads the chat) |
+| `jef research start ["brief"]` | Starts the research agent |
+| `jef tasks set "Task" "Task" …` | Sets the task list. While building, it replaces only the tasks that haven't started |
+| `jef tasks approve` | Approves the list, only after it has waited a heartbeat for you and only if that's allowed for the project |
+| `jef task start N` | Starts task N's implementer, if no other task is still unmerged |
+| `jef agent send impl-2 "…"` | Messages one of its own agents |
+| `jef task publish N [--note …]` | Jef checks the commits for secrets, pushes the branch and opens the PR, or updates the open one (with the note as a comment) |
+| `jef prs check` | Asks GitHub about every PR: merged (recorded, implementer stopped), conflicts, closed |
+| `jef wait "…"` | Shows you on the project page that it's waiting for you |
+| `jef agent stop impl-2` | Stops one of its own agents |
 
 The reading commands work on their own. The others drop a request in the project's `requests/` folder; the running Jef carries it out within a few seconds and prints the answer. So Jef is the only thing that writes the project's files, starts agents and pushes code, and its rules hold whatever a coordinator asks: one task at a time, only its own agents, no secrets pushed, never `main`, never a merge.
 
@@ -106,7 +106,7 @@ A coordinator can't wake itself: each agent is a Claude Code session that only r
 - **straight away when one of its agents finishes a turn**, so it can read the reply and act,
 - when you press **Approve**, **Start research**, **Try again** or **Ask the coordinator to check now**.
 
-Each wake-up says what changed and includes the project's status. On its heartbeat the coordinator nudges implementers that are still working, runs `jef project prs` to check merges and conflicts, and starts the next task when the last one has merged. Heartbeats cost a coordinator turn each, so don't set the interval too short.
+Each wake-up says what changed and includes the project's status. On its heartbeat the coordinator nudges implementers that are still working, runs `jef prs check` to check merges and conflicts, and starts the next task when the last one has merged. Heartbeats cost a coordinator turn each, so don't set the interval too short.
 
 Besides that, Jef only reads files: every half minute it saves finished research as `research.md` and updates each project's `status.md`. That costs nothing. **Check status now** on the project page does the same straight away.
 
@@ -122,7 +122,7 @@ Research and implementation agents only reply in text, to their coordinator:
 | --- | --- | --- |
 | Research agent | Its whole final reply | Jef saves it as `research.md` and wakes the coordinator |
 | Implementer | `STATUS: working` or `STATUS: stuck <reason>` | The coordinator reads it; it nudges, answers, or asks you |
-| Implementer | A fenced `pr` block (title and description), then `STATUS: ready` | The coordinator runs `jef project publish`, and Jef checks for secrets, pushes the branch and opens the PR (or updates the open one) |
+| Implementer | A fenced `pr` block (title and description), then `STATUS: ready` | The coordinator runs `jef task publish`, and Jef checks for secrets, pushes the branch and opens the PR (or updates the open one) |
 
 The skills in `skills/` tell each agent how to work. Each agent's skill is sent with every turn.
 
