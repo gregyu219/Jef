@@ -5,6 +5,7 @@ import pytest
 
 from jef import cli
 from jef.background import Tmux
+from jef.claude import ClaudeCheck
 
 
 class FakeTmux:
@@ -42,6 +43,7 @@ def no_network_or_browser(monkeypatch):
     monkeypatch.setattr(cli, "is_up", lambda port: False)
     monkeypatch.setattr(cli, "wait_until_up", lambda port, seconds=15: True)
     monkeypatch.setattr(cli.webbrowser, "open", lambda url: None)
+    monkeypatch.setattr(cli.claude, "check", lambda: ClaudeCheck(True, path="/bin/claude"))
 
 
 def test_start_runs_jef_in_tmux_with_caffeinate(capsys):
@@ -51,7 +53,7 @@ def test_start_runs_jef_in_tmux_with_caffeinate(capsys):
     assert new[:5] == ["tmux", "new-session", "-d", "-s", "jef"]
     inner = new[new.index("--") + 1 :]
     assert inner[:2] == ["caffeinate", "-is"]
-    assert inner[2:] == [sys.executable, "-m", "jef", "run", "--no-browser", "--port", "9001"]
+    assert inner[2:] == [sys.executable, "-m", "jef", "run", "--no-browser", "--claude-checked", "--port", "9001"]
     assert ["tmux", "set-option", "-t", "=jef:", "@jef_port", "9001"] in fake.calls
     assert "running in the background at http://127.0.0.1:9001" in capsys.readouterr().out
 
@@ -121,3 +123,21 @@ def test_plain_jef_means_run(monkeypatch):
     assert cli.main([]) == 0
     assert cli.main(["--port", "9100"]) == 0
     assert seen["port"] == 9100
+
+
+def test_start_stops_if_claude_code_does_not_work(monkeypatch, capsys):
+    monkeypatch.setattr(cli.claude, "check", lambda: ClaudeCheck(False, "missing"))
+    fake = FakeTmux()
+    assert cli.main(["start"], tmux=make_tmux(fake)) == 1
+    assert "isn't installed" in capsys.readouterr().out
+    assert not any(c[1] == "new-session" for c in fake.calls)
+
+
+def test_run_stops_if_claude_code_is_not_signed_in(monkeypatch, capsys):
+    monkeypatch.setattr(cli.claude, "check", lambda: ClaudeCheck(False, "failed", "Not logged in"))
+    started = []
+    monkeypatch.setattr("uvicorn.run", lambda *a, **k: started.append(1))
+    assert cli.main(["run", "--no-browser"]) == 1
+    out = capsys.readouterr().out
+    assert "Not logged in" in out and "/login" in out
+    assert started == []

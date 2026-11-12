@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
-  {% if not key_saved %}
-  <div class="banner">Jef needs your Anthropic API key before any agent can run. <a href="/settings">Add it in Settings</a>.</div>
+  {% if claude and not claude.ok %}
+  <div class="banner">Agents can't run until Claude Code works on this computer. <a href="/settings">See what to do in Settings</a>.</div>
   {% endif %}
   <section>
     <h2>Backlog</h2>

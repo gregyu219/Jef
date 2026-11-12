@@ -3,12 +3,9 @@ from fastapi.testclient import TestClient
 
 from jef.backlog import Backlog
 from jef.github import GitHubStatus
-from jef.secrets import ANTHROPIC_API_KEY
+from jef.claude import ClaudeCheck
 from jef.web.app import create_app
 from jef.workspace import Workspace
-
-FAKE_KEY = "sk-ant-api03-" + "x" * 40 + "WXYZ"
-
 
 @pytest.fixture
 def ws(tmp_path):
@@ -16,17 +13,16 @@ def ws(tmp_path):
 
 
 @pytest.fixture
-def client(ws, secret_store):
-    app = create_app(ws, secrets=secret_store, github_check=lambda: GitHubStatus(True, "octocat"))
+def client(ws):
+    app = create_app(ws, github_check=lambda: GitHubStatus(True, "octocat"))
     return TestClient(app)
 
 
-def test_home_page_shows_empty_states_and_asks_for_a_key(client):
+def test_home_page_shows_empty_states(client):
     page = client.get("/")
     assert page.status_code == 200
     assert "Your backlog is empty" in page.text
     assert "No projects yet" in page.text
-    assert "needs your Anthropic API key" in page.text
 
 
 def test_adding_a_backlog_item_saves_it_and_shows_it(ws, client):
@@ -60,34 +56,38 @@ def test_user_text_is_escaped(client):
     assert "&lt;script&gt;" in response.text
 
 
-def test_saving_a_key_stores_it_in_the_keychain_not_the_workspace(ws, client, secret_store):
-    page = client.post("/settings/anthropic-key", data={"key": f"  {FAKE_KEY}  "})
-    assert "Key saved" in page.text
-    assert secret_store.get(ANTHROPIC_API_KEY) == FAKE_KEY
-    # The full key is never shown back, and nothing was written to disk.
-    assert FAKE_KEY not in page.text
-    assert "sk-ant-…WXYZ" in page.text
-    assert not any(FAKE_KEY in p.read_text() for p in ws.root.rglob("*") if p.is_file())
-    assert "needs your Anthropic API key" not in client.get("/").text
+def test_settings_shows_claude_code_is_working(ws):
+    app = create_app(ws, github_check=lambda: GitHubStatus(True, "octocat"), claude_status=ClaudeCheck(True, path="/opt/claude"))
+    page = TestClient(app).get("/settings").text
+    assert "Working." in page and "/opt/claude" in page
+    assert "can't run until Claude Code works" not in TestClient(app).get("/").text
 
 
-def test_key_that_is_not_an_anthropic_key_is_rejected(client, secret_store):
-    page = client.post("/settings/anthropic-key", data={"key": "hello"})
-    assert "doesn't look like an Anthropic API key" in page.text
-    assert secret_store.get(ANTHROPIC_API_KEY) is None
+def test_broken_claude_code_shows_what_to_do(ws):
+    app = create_app(ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(False, "failed", "Not logged in"))
+    c = TestClient(app)
+    assert "can't run until Claude Code works" in c.get("/").text
+    settings = c.get("/settings").text
+    assert "Not logged in" in settings and "/login" in settings
 
 
-def test_removing_the_key(client, secret_store):
-    secret_store.set(ANTHROPIC_API_KEY, FAKE_KEY)
-    page = client.post("/settings/anthropic-key/delete")
-    assert "Key removed" in page.text
-    assert secret_store.get(ANTHROPIC_API_KEY) is None
+def test_check_again_reruns_the_check(ws):
+    calls = []
+    app = create_app(
+        ws,
+        github_check=lambda: GitHubStatus(True, "o"),
+        claude_status=ClaudeCheck(False, "missing"),
+        claude_check=lambda: calls.append(1) or ClaudeCheck(True, path="/bin/claude"),
+    )
+    page = TestClient(app).post("/settings/claude-check").text
+    assert calls == [1]
+    assert "Checked just now" in page and "Working." in page
 
 
 def test_settings_shows_github_account(client):
     assert "octocat" in client.get("/settings").text
 
 
-def test_settings_explains_missing_github_login(ws, secret_store):
-    app = create_app(ws, secrets=secret_store, github_check=lambda: GitHubStatus(True, ""))
+def test_settings_explains_missing_github_login(ws):
+    app = create_app(ws, github_check=lambda: GitHubStatus(True, ""))
     assert "gh auth login" in TestClient(app).get("/settings").text

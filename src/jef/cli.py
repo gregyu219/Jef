@@ -19,8 +19,9 @@ import time
 import urllib.request
 import webbrowser
 
-from jef import __version__
+from jef import __version__, claude
 from jef.background import TARGET, Tmux, TmuxMissing
+from jef.claude import ClaudeCheck
 
 HOST = "127.0.0.1"  # Local only: Jef's UI is never reachable from other machines.
 DEFAULT_PORT = 8765
@@ -47,16 +48,34 @@ def wait_until_up(port: int, seconds: float = 15) -> bool:
     return False
 
 
+def check_claude() -> ClaudeCheck | None:
+    """Before starting, make sure Claude Code answers. Prints what to do if not."""
+    print("Checking that Claude Code works…")
+    result = claude.check()
+    if not result.ok:
+        print(result.help)
+        return None
+    return result
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     import uvicorn
 
     from jef.web.app import create_app
 
+    if args.claude_checked:
+        # "jef start" already checked before starting this background copy.
+        status = ClaudeCheck(True, path=claude.find_claude() or "claude")
+    else:
+        status = check_claude()
+        if status is None:
+            return 1
+
     url = url_for(args.port)
     print(f"Jef is running at {url}  (press Ctrl+C to stop)")
     if not args.no_browser:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-    uvicorn.run(create_app(), host=HOST, port=args.port, log_level="warning")
+    uvicorn.run(create_app(claude_status=status), host=HOST, port=args.port, log_level="warning")
     return 0
 
 
@@ -76,6 +95,8 @@ def cmd_start(args: argparse.Namespace, tmux: Tmux) -> int:
         return 0
     if is_up(args.port):
         print(f"Port {args.port} is already in use. Try:  jef start --port 9000")
+        return 1
+    if check_claude() is None:
         return 1
     try:
         tmux.start(args.port)
@@ -143,7 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port to serve on (default: {DEFAULT_PORT})")
         p.add_argument("--no-browser", action="store_true", help="don't open the browser")
 
-    add_port(sub.add_parser("run", help="run Jef in this terminal"))
+    run = sub.add_parser("run", help="run Jef in this terminal")
+    add_port(run)
+    # Internal: "jef start" passes this to the copy it runs in tmux, so the check isn't made twice.
+    run.add_argument("--claude-checked", action="store_true", help=argparse.SUPPRESS)
     add_port(sub.add_parser("start", help="run Jef in the background with tmux"))
     sub.add_parser("status", help="is Jef running, and where?")
     sub.add_parser("attach", help="watch the background session")
