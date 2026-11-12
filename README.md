@@ -10,6 +10,8 @@ You tell Jef what you want built. Jef keeps a backlog, and when you say go, it h
 
 ### Install (once)
 
+Jef runs its agents in [Claude Code](https://code.claude.com/docs/en/quickstart), so install that first, run `claude` once and sign in. Then:
+
 ```
 git clone git@github.com:gregyu219/Jef.git
 cd Jef
@@ -31,6 +33,8 @@ The `ln -s` line puts the `jef` command on your PATH, so you can type `jef` from
 | `jef attach` | Opens Jef's background session so you can watch it. Press **Ctrl+B**, then **D**, to leave it running. |
 | `jef stop` | Stops Jef |
 | `jef run` | Runs Jef in this terminal instead. **Ctrl+C** stops it. Plain `jef` does the same. |
+
+Before it starts, Jef sends Claude Code one tiny message (on the smallest model) to make sure agents will be able to run. If that fails, Jef tells you what to fix and doesn't start.
 
 Jef's page is at http://127.0.0.1:8765. It only listens on your own computer; nothing else on your network can reach it.
 
@@ -76,6 +80,20 @@ Every task in a project's status table is in one of five states:
 
 Each project coordinator wakes up on a heartbeat, every hour by default. You can change the interval for each project in the coordinator UI. On every beat, the coordinator starts agents for new tasks, nudges working agents toward their next hand-off, checks for merged PRs and updates the status table.
 
+### Agents are chats
+
+Like [KiroCrew](https://github.com/kirodotdev/KiroCrew), Jef doesn't call the model itself. It drives Claude Code in headless mode (`claude -p`), and Claude Code signs in however you set it up: your Claude login or your own API key. Jef never sees or stores a key.
+
+Every agent is a named Claude Code session with its own conversation:
+
+- **Spawning** an agent starts a new session with its first message.
+- **Messaging** it later (a heartbeat nudge, a small fix) continues the same session, so it remembers everything so far.
+- **Stopping** an agent also stops every agent it spawned, so stopping a coordinator stops its workers.
+
+Nobody is around to answer permission prompts, so each role gets a fixed list of what it may do, and anything else is refused. No agent may merge a PR or push to `main`, whatever its role. Agents' Claude Code auto memory is switched off, so they keep their notes in Jef's project files, not in your personal memory.
+
+You're responsible for using Claude Code within [Anthropic's terms](https://www.anthropic.com/legal) for the account you sign in with.
+
 ## Where Jef keeps things
 
 Everything lives in plain markdown in Jef's workspace, outside your code repos:
@@ -88,6 +106,8 @@ Everything lives in plain markdown in Jef's workspace, outside your code repos:
       goal.md             what the project is for
       research.md         findings and approach
       tasks.md            every task and its status
+      agents.md           every agent: role, who spawned it, status, session
+      chats/<agent>.jsonl each agent's full conversation
       research/           extra research for single tasks (rare)
 ```
 
@@ -103,7 +123,7 @@ Everything lives in plain markdown in Jef's workspace, outside your code repos:
 - Python
 - Runs locally on your computer
 - Local web UI in your browser
-- Agents built on the Claude Agent SDK
+- Agents run in Claude Code, in headless mode
 
 ## Inspiration
 

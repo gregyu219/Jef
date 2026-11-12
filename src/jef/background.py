@@ -71,7 +71,7 @@ class Tmux:
         # A running tmux server keeps its own environment, so pass JEF_HOME along explicitly.
         if "JEF_HOME" in self.env:
             cmd += ["-e", f"JEF_HOME={self.env['JEF_HOME']}"]
-        inner = [sys.executable, "-m", "jef", "run", "--no-browser", "--port", str(port)]
+        inner = [sys.executable, "-m", "jef", "run", "--no-browser", "--claude-checked", "--port", str(port)]
         if self.which("caffeinate"):
             inner = ["caffeinate", "-is", *inner]
         return cmd + ["--", *inner]

@@ -12,7 +12,8 @@ from fastapi.templating import Jinja2Templates
 
 from jef.backlog import Backlog
 from jef.github import GitHubStatus, github_status
-from jef.secrets import ANTHROPIC_API_KEY, SecretStore, mask
+from jef import claude
+from jef.claude import ClaudeCheck
 from jef.tasks import TaskList, TaskStatus
 from jef.workspace import Workspace
 
@@ -48,12 +49,14 @@ def summarize_projects(ws: Workspace) -> list[ProjectSummary]:
 
 def create_app(
     workspace: Workspace | None = None,
-    secrets: SecretStore | None = None,
     github_check: Callable[[], GitHubStatus] = github_status,
+    claude_status: ClaudeCheck | None = None,
+    claude_check: Callable[[], ClaudeCheck] = claude.check,
 ) -> FastAPI:
+    """``claude_status`` is the result of the check ``jef`` ran on startup, if any."""
     ws = workspace or Workspace.default()
-    store = secrets or SecretStore()
     app = FastAPI(title="Jef", docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.claude = claude_status
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request, error: str = ""):
@@ -67,7 +70,7 @@ def create_app(
                 "projects": summarize_projects(ws),
                 "statuses": list(TaskStatus),
                 "workspace": ws.root,
-                "key_saved": store.get(ANTHROPIC_API_KEY) is not None,
+                "claude": app.state.claude,
                 "error": error,
             },
         )
@@ -89,26 +92,16 @@ def create_app(
             "settings.html",
             {
                 "page": "settings",
-                "key_masked": mask(store.get(ANTHROPIC_API_KEY)),
+                "claude": app.state.claude,
                 "github": github_check(),
                 "notice": notice,
                 "error": error,
             },
         )
 
-    @app.post("/settings/anthropic-key")
-    def save_key(key: str = Form("")):
-        key = key.strip()
-        if not key:
-            return RedirectResponse("/settings?error=empty", status_code=303)
-        if not key.startswith("sk-ant-"):
-            return RedirectResponse("/settings?error=shape", status_code=303)
-        store.set(ANTHROPIC_API_KEY, key)
-        return RedirectResponse("/settings?notice=saved", status_code=303)
-
-    @app.post("/settings/anthropic-key/delete")
-    def delete_key():
-        store.delete(ANTHROPIC_API_KEY)
-        return RedirectResponse("/settings?notice=removed", status_code=303)
+    @app.post("/settings/claude-check")
+    def check_claude_again():
+        app.state.claude = claude_check()
+        return RedirectResponse("/settings?notice=checked", status_code=303)
 
     return app

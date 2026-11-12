@@ -1,0 +1,327 @@
+"""Agents as standing chats, the KiroCrew way.
+
+Every agent Jef spins up (a coordinator, a research agent, an implementer)
+is a named Claude Code session with its own conversation:
+
+- **Spawn** starts a new session with a fixed session ID and a first message.
+- **Send** resumes that same session with another message, so the agent
+  remembers everything so far. Heartbeats and "small fix" requests use this.
+- **Stop** ends an agent. Stopping an agent also stops every agent it spawned,
+  so closing a coordinator closes its workers.
+
+Each turn is one ``claude -p`` run in the background. Jef keeps the record in
+the project folder, in plain files:
+
+    projects/<project>/
+      agents.md            every agent: role, who spawned it, status, session
+      chats/<name>.jsonl   the full conversation, one JSON event per line
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Callable
+
+from jef import mdtable
+from jef.workspace import Workspace
+
+HEADERS = ["Name", "Role", "Parent", "Status", "Session", "Folder"]
+
+# Agents keep their notes in Jef's project files, not in your personal Claude
+# Code memory, so switch Claude Code's auto memory off for them.
+AGENT_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+# Never allowed for any agent, whatever its role. Deny rules win over allow
+# rules in Claude Code. These back up Jef's ground rules; branch protection on
+# GitHub is still the real guard against pushes to main.
+ALWAYS_DENIED = [
+    "Bash(gh pr merge *)",
+    "Bash(gh api *merge*)",
+    "Bash(git push * main)",
+    "Bash(git push * main:*)",
+    "Bash(git push * HEAD:main)",
+    "Bash(git push --force*)",
+    "Bash(git push -f*)",
+]
+
+
+class Role(str, Enum):
+    COORDINATOR = "Coordinator"
+    RESEARCH = "Research"
+    IMPLEMENTER = "Implementer"
+
+
+@dataclass(frozen=True)
+class RolePolicy:
+    """What an agent in this role may do without asking. Nobody is around to
+    answer permission prompts, so anything not allowed here is refused."""
+
+    allowed_tools: list[str]
+    model: str = ""  # empty: Claude Code's default
+
+
+READ_ONLY = ["Read", "Glob", "Grep"]
+POLICIES: dict[Role, RolePolicy] = {
+    Role.COORDINATOR: RolePolicy(READ_ONLY + ["Bash(gh pr view *)", "Bash(gh pr list *)", "Bash(git log *)"]),
+    Role.RESEARCH: RolePolicy(READ_ONLY + ["WebSearch", "WebFetch", "Bash(git log *)"]),
+    Role.IMPLEMENTER: RolePolicy(
+        READ_ONLY
+        + [
+            "Bash(git *)",
+            "Bash(gh pr create *)",
+            "Bash(gh pr view *)",
+            "Bash(gh pr list *)",
+            "Bash(python *)",
+            "Bash(python3 *)",
+            "Bash(pytest *)",
+            "Bash(.venv/bin/*)",
+            "Bash(npm *)",
+            "Bash(ls *)",
+            "Bash(mkdir *)",
+        ]
+    ),
+}
+
+
+class Status(str, Enum):
+    IDLE = "Idle"  # finished its last turn, waiting for a message
+    WORKING = "Working"  # a turn is running right now
+    STOPPED = "Stopped"  # ended for good
+
+
+@dataclass
+class Agent:
+    name: str
+    role: Role
+    session: str
+    folder: str
+    parent: str = ""
+    status: Status = Status.IDLE
+
+
+@dataclass
+class ChatLine:
+    kind: str  # "sent", "text", "tool", "result" or "error"
+    text: str
+
+
+class ChatError(RuntimeError):
+    pass
+
+
+def _roster_path(ws: Workspace, project: str) -> Path:
+    return ws.project_dir(project) / "agents.md"
+
+
+def load_roster(ws: Workspace, project: str) -> list[Agent]:
+    path = _roster_path(ws, project)
+    if not path.exists():
+        return []
+    doc = mdtable.parse(path.read_text(encoding="utf-8"))
+    col = {h.lower(): i for i, h in enumerate(doc.headers)}
+    agents = []
+    for row in doc.rows:
+        get = lambda name: row[col[name]] if name in col else ""  # noqa: E731
+        try:
+            agents.append(
+                Agent(
+                    name=get("name"),
+                    role=Role(get("role")),
+                    session=get("session"),
+                    folder=get("folder"),
+                    parent=get("parent"),
+                    status=Status(get("status") or Status.IDLE.value),
+                )
+            )
+        except ValueError:
+            continue  # A row someone hand-edited into nonsense; skip it.
+    return agents
+
+
+def save_roster(ws: Workspace, project: str, agents: list[Agent]) -> None:
+    path = _roster_path(ws, project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = mdtable.parse(path.read_text(encoding="utf-8")) if path.exists() else mdtable.TableDoc()
+    if not doc.headers:
+        doc.before = [f"# Agents: {project}", ""]
+    doc.headers = HEADERS
+    doc.rows = [[a.name, a.role.value, a.parent, a.status.value, a.session, a.folder] for a in agents]
+    path.write_text(mdtable.render(doc), encoding="utf-8")
+
+
+@dataclass
+class Chats:
+    """Spawns agents as Claude Code sessions and passes messages to them."""
+
+    workspace: Workspace
+    claude_path: str
+    popen: Callable[..., subprocess.Popen] = subprocess.Popen
+    new_session_id: Callable[[], str] = lambda: str(uuid.uuid4())
+    _running: dict[tuple[str, str], subprocess.Popen] = field(default_factory=dict)
+
+    # ---- files
+
+    def chat_file(self, project: str, name: str) -> Path:
+        return self.workspace.project_dir(project) / "chats" / f"{name}.jsonl"
+
+    def _find(self, agents: list[Agent], name: str) -> Agent:
+        for agent in agents:
+            if agent.name == name:
+                return agent
+        raise ChatError(f"There's no agent named {name!r} in this project.")
+
+    # ---- commands
+
+    def command(self, agent: Agent, project: str, first_turn: bool, instructions: str = "") -> list[str]:
+        policy = POLICIES[agent.role]
+        cmd = [self.claude_path, "-p", "--output-format", "stream-json", "--verbose"]
+        if first_turn:
+            cmd += ["--session-id", agent.session, "--name", f"jef · {project} · {agent.name}"]
+        else:
+            cmd += ["--resume", agent.session]
+        cmd += ["--permission-mode", "acceptEdits", "--permission-prompts", "none"]
+        cmd += ["--allowedTools", *policy.allowed_tools]
+        cmd += ["--disallowedTools", *ALWAYS_DENIED]
+        if policy.model:
+            cmd += ["--model", policy.model]
+        if instructions:
+            cmd += ["--append-system-prompt", instructions]
+        return cmd
+
+    def _run_turn(self, project: str, agent: Agent, message: str, sender: str, first_turn: bool, instructions: str = "") -> None:
+        log = self.chat_file(project, agent.name)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as out:
+            out.write(json.dumps({"type": "jef_sent", "from": sender, "text": message}) + "\n")
+        # The message goes in on stdin (from a file, so a long one can't block).
+        prompt_file = log.with_suffix(".prompt")
+        prompt_file.write_text(message, encoding="utf-8")
+        with prompt_file.open("rb") as stdin, log.open("ab") as stdout, log.with_suffix(".err.log").open("ab") as stderr:
+            proc = self.popen(
+                self.command(agent, project, first_turn, instructions),
+                cwd=agent.folder,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                env={**os.environ, **AGENT_ENV},
+                start_new_session=True,  # so stopping Jef's terminal doesn't kill agents mid-turn
+            )
+        self._running[(project, agent.name)] = proc
+
+    def spawn(
+        self,
+        project: str,
+        name: str,
+        role: Role,
+        message: str,
+        folder: str | Path,
+        parent: str = "",
+        instructions: str = "",
+    ) -> Agent:
+        """Start a new agent with its first message."""
+        if not NAME_PATTERN.match(name):
+            raise ChatError("Agent names use lowercase letters, numbers and dashes, like impl-2.")
+        if not Path(folder).is_dir():
+            raise ChatError(f"The folder {folder} doesn't exist.")
+        agents = self.refresh(project)
+        if any(a.name == name for a in agents):
+            raise ChatError(f"There's already an agent named {name!r} in this project.")
+        if parent:
+            self._find(agents, parent)
+        agent = Agent(name, role, self.new_session_id(), str(Path(folder).resolve()), parent, Status.WORKING)
+        agents.append(agent)
+        save_roster(self.workspace, project, agents)
+        self._run_turn(project, agent, message, sender=parent or "you", first_turn=True, instructions=instructions)
+        return agent
+
+    def send(self, project: str, name: str, message: str, sender: str = "you", instructions: str = "") -> Agent:
+        """Send another message to an agent, in the same conversation."""
+        agents = self.refresh(project)
+        agent = self._find(agents, name)
+        if agent.status is Status.STOPPED:
+            raise ChatError(f"{name} has been stopped.")
+        if agent.status is Status.WORKING:
+            raise ChatError(f"{name} is still working on its last message. Try again when it's done.")
+        agent.status = Status.WORKING
+        save_roster(self.workspace, project, agents)
+        self._run_turn(project, agent, message, sender, first_turn=False, instructions=instructions)
+        return agent
+
+    def refresh(self, project: str) -> list[Agent]:
+        """Update statuses: an agent whose turn has ended is Idle again."""
+        agents = load_roster(self.workspace, project)
+        changed = False
+        for agent in agents:
+            if agent.status is not Status.WORKING:
+                continue
+            proc = self._running.get((project, agent.name))
+            # No process means Jef restarted mid-turn; that turn is over.
+            if proc is None or proc.poll() is not None:
+                self._running.pop((project, agent.name), None)
+                agent.status = Status.IDLE
+                changed = True
+        if changed:
+            save_roster(self.workspace, project, agents)
+        return agents
+
+    def stop(self, project: str, name: str) -> list[str]:
+        """Stop an agent and every agent it spawned. Returns the names stopped."""
+        agents = self.refresh(project)
+        self._find(agents, name)
+        to_stop, queue = [], [name]
+        while queue:
+            current = queue.pop()
+            to_stop.append(current)
+            queue += [a.name for a in agents if a.parent == current and a.name not in to_stop]
+        for agent in agents:
+            if agent.name in to_stop:
+                proc = self._running.pop((project, agent.name), None)
+                if proc is not None and proc.poll() is None:
+                    proc.terminate()
+                agent.status = Status.STOPPED
+        save_roster(self.workspace, project, agents)
+        return to_stop
+
+    # ---- reading conversations
+
+    def transcript(self, project: str, name: str) -> list[ChatLine]:
+        path = self.chat_file(project, name)
+        if not path.exists():
+            return []
+        lines: list[ChatLine] = []
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            lines.extend(_describe(event))
+        return lines
+
+
+def _describe(event: dict) -> list[ChatLine]:
+    kind = event.get("type")
+    if kind == "jef_sent":
+        return [ChatLine("sent", f"{event.get('from', 'you')}: {event.get('text', '')}")]
+    if kind == "assistant":
+        out = []
+        for block in event.get("message", {}).get("content", []):
+            if block.get("type") == "text" and block.get("text", "").strip():
+                out.append(ChatLine("text", block["text"].strip()))
+            elif block.get("type") == "tool_use":
+                detail = block.get("input", {})
+                summary = detail.get("command") or detail.get("file_path") or detail.get("pattern") or ""
+                out.append(ChatLine("tool", f"{block.get('name')} {summary}".strip()))
+        return out
+    if kind == "result":
+        if event.get("is_error"):
+            return [ChatLine("error", str(event.get("result") or event.get("subtype") or "The turn failed."))]
+        return [ChatLine("result", "Turn finished.")]
+    return []

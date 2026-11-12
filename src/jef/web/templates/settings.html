@@ -2,26 +2,21 @@
 {% block title %}Settings · Jef{% endblock %}
 {% block content %}
   <section>
-    <h2>Anthropic API key</h2>
-    <p class="hint">Jef's agents use this key to talk to Claude. It's saved in your computer's keychain, never in a file, and Jef blocks anything that contains it from being committed or pushed to GitHub.</p>
-    {% if key_masked %}
-    <p><span class="ok">Saved</span> &nbsp;<code>{{ key_masked }}</code></p>
+    <h2>Claude Code</h2>
+    <p class="hint">Jef's agents run in Claude Code, in headless mode (<code>claude -p</code>). Claude Code signs in the way you set it up, with your Claude login or your own API key, so Jef never sees or stores a key.</p>
+    {% if claude is none %}
+    <p><span class="missing">Not checked yet.</span></p>
+    {% elif claude.ok %}
+    <p><span class="ok">Working.</span> Using <code>{{ claude.path }}</code></p>
     {% else %}
-    <p><span class="missing">Not set.</span> You can create a key in the Anthropic Console.</p>
+    <p><span class="missing">Not working yet.</span></p>
+    <pre class="help">{{ claude.help }}</pre>
     {% endif %}
-    <form method="post" action="/settings/anthropic-key">
-      <input type="password" name="key" placeholder="{{ 'Paste a new key to replace it' if key_masked else 'Paste your API key' }}" aria-label="Anthropic API key" autocomplete="off">
-      <button type="submit">Save key</button>
+    <form method="post" action="/settings/claude-check">
+      <button type="submit" class="secondary">Check again</button>
     </form>
-    {% if key_masked %}
-    <form method="post" action="/settings/anthropic-key/delete">
-      <button type="submit" class="secondary">Remove key</button>
-    </form>
-    {% endif %}
-    {% if notice == "saved" %}<p class="notice">Key saved.</p>{% endif %}
-    {% if notice == "removed" %}<p class="notice">Key removed.</p>{% endif %}
-    {% if error == "empty" %}<p class="error">Paste a key first.</p>{% endif %}
-    {% if error == "shape" %}<p class="error">That doesn't look like an Anthropic API key. They start with <code>sk-ant-</code>.</p>{% endif %}
+    <p class="hint">A check sends Claude one tiny message, using the smallest model.</p>
+    {% if notice == "checked" %}<p class="notice">Checked just now.</p>{% endif %}
   </section>
 
   <section>
