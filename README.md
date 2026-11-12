@@ -121,6 +121,10 @@ When an implementer reports `STATUS: ready`, Jef:
 
 If something needs fixing, Jef tells the agent, up to three times, then marks it stuck for you. The secret check only knows common secret shapes, so it's a safety net, not a guarantee. Agents can also run code (to build and test), so these rules aren't a sandbox. Turn on GitHub branch protection for `main` as the final guard. Agents' Claude Code auto memory is switched off, so they keep their notes in Jef's project files, not in your personal memory.
 
+### Usage and cost
+
+Every finished agent turn ends with a summary from Claude Code that includes the tokens it used and an estimated cost. Jef adds these up straight from the chat logs (no separate ledger) and shows them per agent and per project on the project page, the agent page and the home page. The costs are Claude Code's estimates at API list prices: if you sign in with a Claude subscription you aren't billed per token, so read them as "what this would cost on the API". A turn that's stopped before it finishes writes no summary, so its usage isn't counted.
+
 You're responsible for using Claude Code within [Anthropic's terms](https://www.anthropic.com/legal) for the account you sign in with.
 
 ## Where Jef keeps things

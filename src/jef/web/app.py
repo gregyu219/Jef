@@ -19,9 +19,12 @@ from jef.github import GitHubStatus, github_status
 from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError
 from jef.projects import StartError, gh_clone, known_repos, load_project, parse_repo, projects_on_repo, start_project
 from jef.tasks import TaskList, TaskStatus
+from jef.usage import Usage, agent_usage, format_cost, format_tokens, project_total, project_usage
 from jef.workspace import Workspace
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+TEMPLATES.env.filters["tokens"] = format_tokens
+TEMPLATES.env.filters["cost"] = format_cost
 
 
 @dataclass
@@ -30,6 +33,7 @@ class ProjectSummary:
     name: str
     total: int
     counts: dict[TaskStatus, int]
+    usage: Usage = Usage()
 
     @property
     def merged(self) -> int:
@@ -46,6 +50,7 @@ def summarize_projects(ws: Workspace) -> list[ProjectSummary]:
                 name=tasks.title or slug,
                 total=len(tasks.tasks),
                 counts=tasks.counts(),
+                usage=project_total(ws, slug),
             )
         )
     return summaries
@@ -181,6 +186,7 @@ def create_app(
         flow = get_pipeline()
         agents = runner.refresh(slug) if runner else []
         coordinator = next((a for a in agents if a.name == project.coordinator_agent), None)
+        usage = project_usage(ws, slug)
         return TEMPLATES.TemplateResponse(
             request,
             "project.html",
@@ -199,6 +205,9 @@ def create_app(
                 "research": flow.research(slug) if flow else "",
                 "heartbeat": flow.heartbeat_minutes(slug) if flow else 60,
                 "at_once": IMPLEMENTERS_AT_ONCE,
+                "usage": usage,
+                "usage_total": sum(usage.values(), Usage()),
+                "no_usage": Usage(),
                 "error": error,
             },
         )
@@ -250,6 +259,7 @@ def create_app(
                 "project": project,
                 "agent": agent,
                 "chat": runner.transcript(slug, name),
+                "usage": agent_usage(runner.chat_file(slug, name)),
                 "working": agent.status is Status.WORKING,
             },
         )

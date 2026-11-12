@@ -39,7 +39,7 @@
     <p class="hint">How every started project is going.</p>
     {% if projects %}
     <table>
-      <thead><tr><th>Project</th><th>Tasks merged</th><th>Progress</th></tr></thead>
+      <thead><tr><th>Project</th><th>Tasks merged</th><th>Progress</th><th>Est. cost</th></tr></thead>
       <tbody>
       {% for p in projects %}
         <tr>
@@ -50,6 +50,7 @@
               {% for s in statuses %}{% if p.counts[s] %}<span class="s{{ loop.index0 }}" style="width: {{ 100 * p.counts[s] / p.total }}%"></span>{% endif %}{% endfor %}
             </div>
           </td>
+          <td class="num">{{ p.usage.cost_usd | cost }}</td>
         </tr>
       {% endfor %}
       </tbody>
