@@ -254,6 +254,7 @@ def create_app(
                 "problem": flow.problem(slug) if flow else "",
                 "research": flow.research(slug) if flow else "",
                 "heartbeat": flow.heartbeat_minutes(slug) if flow else 60,
+                "coordinator_decides": flow.coordinator_decides(slug) if flow else True,
                 "last_checked": ago(flow.now() - checked) if checked is not None else "",
                 "at_once": IMPLEMENTERS_AT_ONCE,
                 "usage": usage,
@@ -298,6 +299,10 @@ def create_app(
         if not minutes.strip().isdigit():
             return RedirectResponse(f"/projects/{slug}?error=Type+a+number+of+minutes.", status_code=303)
         return pipeline_action(slug, lambda flow: flow.set_heartbeat_minutes(slug, int(minutes)))
+
+    @app.post("/projects/{slug}/coordinator-decides")
+    def set_coordinator_decides(slug: str, on: str = Form("")):
+        return pipeline_action(slug, lambda flow: flow.set_coordinator_decides(slug, on == "yes"))
 
     @app.get("/projects/{slug}/agents/{name}", response_class=HTMLResponse)
     def agent_page(request: Request, slug: str, name: str):

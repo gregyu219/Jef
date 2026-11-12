@@ -70,6 +70,10 @@ always waits for approval again. Don't approve if the person asked for changes
 or a question is still open; ask them instead, and Jef will ask you again at
 the next heartbeat.
 
+The person can turn this off for the project. Then Jef never asks you to
+decide and ignores `ACTION: approve-tasks`, so if they ask you to approve, tell
+them to press the approve button in Jef.
+
 ### 3. While tasks are built
 
 Implementation agents build one task each and open PRs. If the person asks
