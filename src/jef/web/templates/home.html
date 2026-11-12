@@ -6,7 +6,7 @@
   {% endif %}
   <section id="jef">
     <h2>Chat with Jef</h2>
-    <p class="hint">Ask about your backlog and how projects are going. Jef starts with a briefing on both, and can read the details but can't change anything.</p>
+    <p class="hint">Ask about your backlog and how projects are going. Jef starts with a briefing on both, and can read the details but can't change anything. Reset saves this conversation and starts Jef fresh with a new briefing.</p>
     {% if jef_working %}<p class="hint">Working… this page refreshes by itself.</p>{% endif %}
     {% if jef_chat %}
     <ol class="chat">
@@ -21,6 +21,10 @@
     <form method="post" action="/jef/message">
       <input type="text" name="message" placeholder="Message Jef" aria-label="Message Jef" autocomplete="off">
       <button type="submit">Send</button>
+    </form>
+    <form method="post" action="/jef/reset" class="inline"
+          onsubmit='return confirm("Start Jef over? The current conversation is saved, and Jef starts fresh with a new briefing.")'>
+      <button type="submit" class="secondary">Reset</button>
     </form>
     {% else %}
     <p class="hint">Jef's chat starts once Claude Code works. <a href="/settings">See Settings</a>.</p>

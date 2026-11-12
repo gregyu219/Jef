@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -47,7 +48,7 @@ def env(tmp_path):
         procs.append(FakeProc(cmd, **kwargs))
         return procs[-1]
 
-    ids = iter(["session-1", "session-2"])
+    ids = iter(["session-1", "session-2", "session-3"])
     chats = Chats(jefchat.jef_workspace(ws), "/bin/claude", popen=popen, new_session_id=lambda: next(ids))
     return ws, chats, procs
 
@@ -99,6 +100,34 @@ def test_jef_chat_is_kept_outside_the_projects(env):
     assert chats.chat_file(jefchat.HOME, jefchat.NAME).exists()
 
 
+def test_reset_archives_the_chat_and_starts_fresh_with_the_briefing(env):
+    ws, chats, procs = env
+    jefchat.send(chats, ws, "Hi")  # still working: reset stops it
+    when = lambda: datetime(2026, 11, 11, 9, 30, 0)  # noqa: E731
+    agent = jefchat.reset(chats, ws, now=when)
+    assert procs[0].done  # the old turn was ended
+    assert agent.session == "session-2" and agent.role is Role.JEF
+    cmd = procs[1].cmd
+    assert cmd[cmd.index("--session-id") + 1] == "session-2" and "--append-system-prompt" in cmd
+    assert procs[1].stdin_text == jefchat.context_message(ws)
+    archive = chats.chat_file(jefchat.HOME, "jef-20261111-093000")
+    assert "The person says: Hi" in archive.read_text()
+    assert "The person says" not in chats.chat_file(jefchat.HOME, jefchat.NAME).read_text()
+    roster = load_roster(jefchat.jef_workspace(ws), jefchat.HOME)
+    assert [(a.name, a.session) for a in roster] == [("jef", "session-2")]
+    # Resetting twice in the same second keeps both old conversations.
+    jefchat.reset(chats, ws, now=when)
+    assert chats.chat_file(jefchat.HOME, "jef-20261111-093000-2").exists()
+    assert archive.exists()
+
+
+def test_reset_before_any_chat_just_starts_one(env):
+    ws, chats, procs = env
+    agent = jefchat.reset(chats, ws)
+    assert agent.session == "session-1" and len(procs) == 1
+    assert procs[0].stdin_text == jefchat.context_message(ws)
+
+
 # ---- the home page
 
 
@@ -141,6 +170,20 @@ def test_empty_and_busy_messages_show_errors(client):
     assert "Jef is still working" in c.post("/jef/message", data={"message": "Again"}).text
 
 
+def test_reset_button_clears_the_chat_and_starts_over(client):
+    c, ws, chats, procs = client
+    assert 'action="/jef/reset"' in c.get("/").text
+    c.post("/jef/message", data={"message": "Remember the old days"})
+    procs[0].done = True
+    response = c.post("/jef/reset", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/#jef"
+    page = c.get("/").text
+    assert "Remember the old days" not in page
+    assert "Weekly email summary (In progress, coordinator Ada)" in page  # the new briefing
+    assert 'http-equiv="refresh"' in page  # Jef is working on its greeting
+    assert len(list(chats.chat_file(jefchat.HOME, jefchat.NAME).parent.glob("jef-*.jsonl"))) == 1
+
+
 def test_no_claude_means_no_jef_chat(env):
     ws, _, _ = env
     c = TestClient(create_app(ws, github_check=lambda: GitHubStatus(True, "o")))
@@ -148,3 +191,4 @@ def test_no_claude_means_no_jef_chat(env):
     assert 'action="/jef/message"' not in page and "starts once Claude Code works" in page
     response = c.post("/jef/message", data={"message": "Hi"})
     assert "Claude Code isn't working right now" in response.text
+    assert "Claude Code isn't working right now" in c.post("/jef/reset").text

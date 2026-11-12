@@ -10,13 +10,17 @@ The chat is kept outside ``projects/`` so it never shows up as a project:
     jef/projects/home/
       agents.md          the one "jef" agent
       chats/jef.jsonl    the conversation
+      chats/jef-<time>.jsonl   earlier conversations, kept by Reset
 """
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Callable
+
 from jef import skills
 from jef.backlog import Backlog
-from jef.chats import Agent, Chats, Role
+from jef.chats import Agent, Chats, Role, load_roster, save_roster
 from jef.projects import load_project
 from jef.tasks import TaskList, TaskStatus
 from jef.workspace import Workspace
@@ -88,3 +92,24 @@ def send(chats: Chats, ws: Workspace, message: str) -> Agent:
                 instructions=skills.load("jef"),
             )
         return chats.send(HOME, NAME, message)
+
+
+def reset(chats: Chats, ws: Workspace, now: Callable[[], datetime] = datetime.now) -> Agent:
+    """Start Jef over: end the session, keep the old conversation as
+    ``chats/jef-<timestamp>.jsonl``, and start a new session with a fresh
+    briefing, so Jef greets you already knowing where things stand."""
+    with chats.lock:
+        if agent(chats) is not None:
+            chats.stop(HOME, NAME)
+        log = chats.chat_file(HOME, NAME)
+        if log.exists():
+            stamp = now().strftime("%Y%m%d-%H%M%S")
+            archive = log.with_name(f"{NAME}-{stamp}.jsonl")
+            n = 2
+            while archive.exists():
+                archive = log.with_name(f"{NAME}-{stamp}-{n}.jsonl")
+                n += 1
+            log.rename(archive)
+        save_roster(chats.workspace, HOME, [a for a in load_roster(chats.workspace, HOME) if a.name != NAME])
+        ws.root.mkdir(parents=True, exist_ok=True)
+        return chats.spawn(HOME, NAME, Role.JEF, context_message(ws), ws.root, instructions=skills.load("jef"))

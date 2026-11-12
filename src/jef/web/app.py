@@ -157,6 +157,17 @@ def create_app(
             return RedirectResponse("/?error=" + ("jef-busy" if "still working" in str(err) else "jef-failed") + "#jef", status_code=303)
         return RedirectResponse("/#jef", status_code=303)
 
+    @app.post("/jef/reset")
+    def reset_jef():
+        runner = get_jef_chats()
+        if runner is None:
+            return RedirectResponse("/?error=jef-claude#jef", status_code=303)
+        try:
+            jefchat.reset(runner, ws)
+        except ChatError:
+            return RedirectResponse("/?error=jef-failed#jef", status_code=303)
+        return RedirectResponse("/#jef", status_code=303)
+
     @app.post("/backlog")
     def add_backlog_item(feature: str = Form("")):
         backlog = Backlog.load(ws.backlog_file)

@@ -115,7 +115,7 @@ Nobody is around to answer permission prompts, so each role gets a fixed list of
 
 ### Chat with Jef
 
-The home page has its own chat with Jef. Ask it how projects are going, or talk through an idea before you add it to the backlog. Your first message starts a session whose briefing lists every backlog item and every project, one line each, and Jef can read the workspace files for more. It's read-only: to add or start backlog items, use the page's buttons. Its usage isn't counted in any project's total.
+The home page has its own chat with Jef. Ask it how projects are going, or talk through an idea before you add it to the backlog. Your first message starts a session whose briefing lists every backlog item and every project, one line each, and Jef can read the workspace files for more. It's read-only: to add or start backlog items, use the page's buttons. Its usage isn't counted in any project's total. **Reset** starts Jef over: it ends the session, saves the old conversation, and starts a new session with a fresh briefing, so Jef greets you already knowing where things stand.
 
 ### Jef opens the PRs
 
@@ -151,7 +151,8 @@ Everything lives in plain markdown in Jef's workspace, outside your code repos:
       research/           extra research for single tasks (rare)
       repo/               the coordinator's clone of the project's repo
       work/impl-<n>/      each implementer's own checkout
-  jef/projects/home/      the home page's chat with Jef (agents.md, chats/jef.jsonl)
+  jef/projects/home/      the home page's chat with Jef (agents.md, chats/jef.jsonl;
+                          chats/jef-<time>.jsonl are earlier chats kept by Reset)
 ```
 
 ## Ground rules
