@@ -11,7 +11,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from jef import claude
+from jef import claude, jefchat
 from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Chats, ChatError, Status
 from jef.claude import ClaudeCheck
@@ -76,12 +76,14 @@ def create_app(
     clone: Callable[[str, Path], None] = gh_clone,
     pipeline: Pipeline | None = None,
     choose_name: Callable[[list[str]], str] = random.choice,
+    jef_chats: Chats | None = None,
 ) -> FastAPI:
     """``claude_status`` is the result of the check ``jef`` ran on startup, if any."""
     ws = workspace or Workspace.default()
     app = FastAPI(title="Jef", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.claude = claude_status
     app.state.chats = chats
+    app.state.jef_chats = jef_chats
     app.state.pipeline = pipeline
 
     def get_chats() -> Chats | None:
@@ -90,6 +92,13 @@ def create_app(
         if app.state.chats is None and status is not None and status.ok:
             app.state.chats = Chats(ws, status.path)
         return app.state.chats
+
+    def get_jef_chats() -> Chats | None:
+        """The home page's own chat, kept apart from the projects."""
+        status = app.state.claude
+        if app.state.jef_chats is None and status is not None and status.ok:
+            app.state.jef_chats = jefchat.make_chats(ws, status.path)
+        return app.state.jef_chats
 
     def get_pipeline() -> Pipeline | None:
         runner = get_chats()
@@ -112,11 +121,17 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request, error: str = ""):
         backlog = Backlog.load(ws.backlog_file)
+        jef_runner = get_jef_chats()
+        jef_agent = jefchat.agent(jef_runner) if jef_runner else None
         return TEMPLATES.TemplateResponse(
             request,
             "home.html",
             {
                 "page": "home",
+                "jef_ok": jef_runner is not None,
+                "jef_chat": jef_runner.transcript(jefchat.HOME, jefchat.NAME) if jef_runner else [],
+                "jef_agent": jef_agent,
+                "jef_working": jef_agent is not None and jef_agent.status is Status.WORKING,
                 "backlog": backlog.items,
                 "projects": summarize_projects(ws),
                 "statuses": list(TaskStatus),
@@ -127,6 +142,19 @@ def create_app(
                 "error": error,
             },
         )
+
+    @app.post("/jef/message")
+    def message_jef(message: str = Form("")):
+        if not message.strip():
+            return RedirectResponse("/?error=jef-empty#jef", status_code=303)
+        runner = get_jef_chats()
+        if runner is None:
+            return RedirectResponse("/?error=jef-claude#jef", status_code=303)
+        try:
+            jefchat.send(runner, ws, message.strip())
+        except ChatError as err:
+            return RedirectResponse("/?error=" + ("jef-busy" if "still working" in str(err) else "jef-failed") + "#jef", status_code=303)
+        return RedirectResponse("/#jef", status_code=303)
 
     @app.post("/backlog")
     def add_backlog_item(feature: str = Form("")):

@@ -1,8 +1,36 @@
 {% extends "base.html" %}
+{% block head %}{% if jef_working %}<meta http-equiv="refresh" content="5">{% endif %}{% endblock %}
 {% block content %}
   {% if claude and not claude.ok %}
   <div class="banner">Agents can't run until Claude Code works on this computer. <a href="/settings">See what to do in Settings</a>.</div>
   {% endif %}
+  <section id="jef">
+    <h2>Chat with Jef</h2>
+    <p class="hint">Ask about your backlog and how projects are going. Jef starts with a briefing on both, and can read the details but can't change anything.</p>
+    {% if jef_working %}<p class="hint">Working… this page refreshes by itself.</p>{% endif %}
+    {% if jef_chat %}
+    <ol class="chat">
+      {% for line in jef_chat %}
+      <li class="{{ line.kind }}">{{ line.text }}</li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="empty">No messages yet. Your first message starts the chat.</p>
+    {% endif %}
+    {% if jef_ok %}
+    <form method="post" action="/jef/message">
+      <input type="text" name="message" placeholder="Message Jef" aria-label="Message Jef" autocomplete="off">
+      <button type="submit">Send</button>
+    </form>
+    {% else %}
+    <p class="hint">Jef's chat starts once Claude Code works. <a href="/settings">See Settings</a>.</p>
+    {% endif %}
+    {% if error == "jef-empty" %}<p class="error">Type a message first.</p>{% endif %}
+    {% if error == "jef-busy" %}<p class="error">Jef is still working on the last message. Send this when it's done.</p>{% endif %}
+    {% if error == "jef-failed" %}<p class="error">Jef couldn't take that message. Try again.</p>{% endif %}
+    {% if error == "jef-claude" %}<p class="error">Claude Code isn't working right now. See Settings.</p>{% endif %}
+  </section>
+
   <section>
     <h2>Backlog</h2>
     <p class="hint">Everything you've asked for. Nothing starts until you press Start and confirm.</p>
