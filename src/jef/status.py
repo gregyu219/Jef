@@ -11,6 +11,7 @@ and writes it to ``projects/<slug>/status.md``:
     - Coordinator note: Approved the tasks
     - Problem: none
     - Tasks: 1 of 2 merged
+    - Implementers at once: 1
     - Updated: 2026-11-11 14:05
 
     | # | Task | Stage | Agent | Agent status | PR | Note |
@@ -29,7 +30,7 @@ from pathlib import Path
 
 from jef import mdtable
 from jef.chats import Agent, Status
-from jef.projects import goal_fields, load_project
+from jef.projects import goal_fields, implementers_at_once, load_project
 from jef.tasks import TaskList, TaskStatus
 from jef.workspace import Workspace
 
@@ -144,6 +145,7 @@ def render_status(ws: Workspace, slug: str, agents: list[Agent], now: datetime |
             f"- Coordinator note: {_one_line(coordinator.note) if coordinator and coordinator.note else 'none'}",
             f"- Problem: {_one_line(problem, 300)}",
             f"- Tasks: {merged} of {len(tasks)} merged" if tasks else "- Tasks: none yet",
+            f"- Implementers at once: {implementers_at_once(ws, slug)}",
             f"{UPDATED} {stamp}",
             "",
         ]

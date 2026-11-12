@@ -1,17 +1,17 @@
 """How a project runs, from "go" to merged PRs.
 
 **The coordinator runs its project.** It talks with you, starts research,
-plans the tasks, starts implementers one at a time, nudges them, checks their
-PRs on GitHub (merged? conflicts?) and sends work back. It does all of that
-with its own ``jef`` commands (``jef task start 1``, ``jef prs check``; see
-``jef.coordinate``), which Jef carries out
-from its inbox (``jef.inbox``). Jef doesn't decide anything itself.
+plans the tasks, starts implementers (up to N tasks at a time, set per
+project), nudges them, checks their PRs on GitHub (merged? conflicts?) and
+sends work back. It does all of that with its own ``jef`` commands (``jef
+task start 1``, ``jef prs check``; see ``jef.coordinate``), which Jef carries
+out from its inbox (``jef.inbox``). Jef doesn't decide anything itself.
 
 **Jef only keeps time and keeps the rules.** While it runs, it:
 
 - carries out coordinators' requests within a few seconds, refusing anything
-  against the rules (one task at a time, only the coordinator's own agents,
-  secrets never pushed, never ``main``),
+  against the rules (no more tasks at once than the project allows, only the
+  coordinator's own agents, secrets never pushed, never ``main``),
 - wakes each coordinator once per heartbeat (an hour by default), or sooner
   when one of its agents finishes a turn or you press a button,
 - saves the research agent's findings as research.md, and
@@ -47,7 +47,14 @@ from typing import Callable
 from jef import inbox, models, skills, usage
 from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Agent, Chats, ChatError, Role, Status, load_roster
-from jef.projects import DEFAULT_HEARTBEAT_MINUTES, goal_fields, load_project, set_goal_field
+from jef.projects import (
+    DEFAULT_HEARTBEAT_MINUTES,
+    MAX_IMPLEMENTERS_AT_ONCE,
+    goal_fields,
+    implementers_at_once,
+    load_project,
+    set_goal_field,
+)
 from jef.publish import Publisher, PublishError
 from jef.status import WAITING, Phase, project_phase, render_status, write_status
 from jef.tasks import Task, TaskList, TaskStatus
@@ -58,9 +65,6 @@ log = logging.getLogger("jef.pipeline")
 RESEARCH_AGENT = "research"
 INBOX_SECONDS = 2  # how often Jef looks for coordinators' requests
 TICK_SECONDS = 30  # how often Jef re-reads the files and sees who to wake
-# Tasks usually build on each other, so one task is in flight at a time: the
-# coordinator starts the next once the last one's PR is merged.
-IMPLEMENTERS_AT_ONCE = 1
 MAX_CONTEXT_CHARS = 30_000
 MAX_READ_CHARS = 12_000
 
@@ -98,6 +102,16 @@ def pr_label(url: str) -> str:
 def _short(text: str, limit: int = 160) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _at_limit(numbers: list[int], limit: int) -> str:
+    """Why another task can't start: "Tasks 1 and 2 aren't merged yet, …"."""
+    if len(numbers) == 1:
+        busy = f"Task {numbers[0]} isn't"
+    else:
+        busy = "Tasks " + ", ".join(map(str, numbers[:-1])) + f" and {numbers[-1]} aren't"
+    at_most = "builds 1 task" if limit == 1 else f"builds at most {limit} tasks"
+    return f"{busy} merged yet, and this project {at_most} at a time."
 
 
 def _tail(text: str, limit: int = MAX_CONTEXT_CHARS) -> str:
@@ -220,6 +234,15 @@ class Pipeline:
         if not 5 <= minutes <= 24 * 60:
             raise PipelineError("Pick a heartbeat between 5 minutes and 24 hours.")
         set_goal_field(self.workspace, slug, "Heartbeat", f"{minutes} minutes")
+
+    def implementers_at_once(self, slug: str) -> int:
+        """How many tasks may be in flight (building or waiting for review) at once."""
+        return implementers_at_once(self.workspace, slug)
+
+    def set_implementers_at_once(self, slug: str, n: int) -> None:
+        if not 1 <= n <= MAX_IMPLEMENTERS_AT_ONCE:
+            raise PipelineError(f"Pick between 1 and {MAX_IMPLEMENTERS_AT_ONCE} tasks at once.")
+        set_goal_field(self.workspace, slug, "Implementers at once", str(n))
 
     def coordinator_decides(self, slug: str) -> bool:
         """Whether the coordinator may approve its own task list once it has
@@ -440,10 +463,9 @@ class Pipeline:
             if task.status is not TaskStatus.NOT_STARTED:
                 raise PipelineError(f"Task {number} has already started ({task.status.value}).")
             busy = [t for t in tasks.tasks if t.status in IN_FLIGHT]
-            if len(busy) >= IMPLEMENTERS_AT_ONCE:
-                raise PipelineError(
-                    f"Task {busy[0].number} isn't merged yet, and only {IMPLEMENTERS_AT_ONCE} task is built at a time."
-                )
+            limit = self.implementers_at_once(slug)
+            if len(busy) >= limit:
+                raise PipelineError(_at_limit([t.number for t in busy], limit))
             merged = goal_fields(self.workspace, slug).get("last merged", "")
             note = f"Started by {by}" + (f" after {pr_label(merged)} merged" if merged else "")
             try:

@@ -17,13 +17,14 @@ from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Agent, Chats, ChatError, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
-from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError, pr_label
+from jef.pipeline import Phase, Pipeline, PipelineError, pr_label
 from jef.projects import (
     DeleteError,
     StartError,
     delete_project,
     gh_clone,
     goal_fields,
+    implementers_at_once,
     known_repos,
     load_project,
     parse_repo,
@@ -448,7 +449,7 @@ def create_app(
                 ],
                 "model_choices": models.CHOICES,
                 "last_checked": ago(flow.now() - checked) if checked is not None else "",
-                "at_once": IMPLEMENTERS_AT_ONCE,
+                "at_once": implementers_at_once(ws, slug),
                 "usage": usage,
                 "usage_total": sum(usage.values(), Usage()),
                 "budget": budget_usd(ws, slug),
