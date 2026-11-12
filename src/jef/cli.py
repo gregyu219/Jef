@@ -71,12 +71,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         if status is None:
             return 1
 
+    from jef import jefchat
     from jef.chats import Chats
     from jef.pipeline import Heartbeat, Pipeline
     from jef.workspace import Workspace
 
     ws = Workspace.default()
     chats = Chats(ws, status.path)
+    jef_chats = jefchat.make_chats(ws, status.path)
     pipeline = Pipeline(ws, chats)
     heartbeat = Heartbeat(pipeline)
     heartbeat.tick_all()  # pick up anything that finished while Jef was off
@@ -87,11 +89,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not args.no_browser:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     try:
-        app = create_app(ws, claude_status=status, chats=chats, pipeline=pipeline)
+        app = create_app(ws, claude_status=status, chats=chats, pipeline=pipeline, jef_chats=jef_chats)
         uvicorn.run(app, host=HOST, port=args.port, log_level="warning")
     finally:
         heartbeat.stop()
         chats.stop_running_turns()
+        jef_chats.stop_running_turns()
     return 0
 
 

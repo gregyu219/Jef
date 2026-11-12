@@ -61,6 +61,7 @@ class Role(str, Enum):
     COORDINATOR = "Coordinator"
     RESEARCH = "Research"
     IMPLEMENTER = "Implementer"
+    JEF = "Jef"  # the home page's own chat
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,8 @@ READ_ONLY = ["Read", "Glob", "Grep"]
 POLICIES: dict[Role, RolePolicy] = {
     Role.COORDINATOR: RolePolicy(READ_ONLY + ["Bash(gh pr view *)", "Bash(gh pr list *)", "Bash(git log *)"]),
     Role.RESEARCH: RolePolicy(READ_ONLY + ["WebSearch", "WebFetch", "Bash(git log *)"]),
+    # Jef's own chat isn't in a repo: it only reads the workspace files.
+    Role.JEF: RolePolicy(READ_ONLY),
     Role.IMPLEMENTER: RolePolicy(
         READ_ONLY
         + [

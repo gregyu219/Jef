@@ -113,6 +113,10 @@ Every agent is a named Claude Code session with its own conversation:
 
 Nobody is around to answer permission prompts, so each role gets a fixed list of what it may do, and anything else is refused. **No agent can push, open a PR or merge**, whatever its role: implementers only commit, and Jef's own code does the rest.
 
+### Chat with Jef
+
+The home page has its own chat with Jef. Ask it how projects are going, or talk through an idea before you add it to the backlog. Your first message starts a session whose briefing lists every backlog item and every project, one line each, and Jef can read the workspace files for more. It's read-only: to add or start backlog items, use the page's buttons. Its usage isn't counted in any project's total.
+
 ### Jef opens the PRs
 
 When an implementer reports `STATUS: ready`, Jef:
@@ -147,6 +151,7 @@ Everything lives in plain markdown in Jef's workspace, outside your code repos:
       research/           extra research for single tasks (rare)
       repo/               the coordinator's clone of the project's repo
       work/impl-<n>/      each implementer's own checkout
+  jef/projects/home/      the home page's chat with Jef (agents.md, chats/jef.jsonl)
 ```
 
 ## Ground rules
