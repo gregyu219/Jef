@@ -109,6 +109,16 @@
     {% endif %}
   </section>
 
+  {% if status_text %}
+  <section>
+    <details>
+      <summary><h2>Status file</h2></summary>
+      <p class="hint">Jef's own record of this project, kept up to date without any AI calls. Also at <a href="/projects/{{ project.slug }}/status">/projects/{{ project.slug }}/status</a>.</p>
+      <pre class="doc">{{ status_text }}</pre>
+    </details>
+  </section>
+  {% endif %}
+
   {% if research %}
   <section>
     <details>

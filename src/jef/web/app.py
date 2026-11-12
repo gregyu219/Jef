@@ -8,16 +8,17 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from jef import claude, jefchat
 from jef.backlog import Backlog, BacklogStatus
-from jef.chats import Chats, ChatError, Status
+from jef.chats import Agent, Chats, ChatError, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
 from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError
 from jef.projects import StartError, gh_clone, known_repos, load_project, parse_repo, projects_on_repo, start_project, used_backlog_numbers
+from jef.status import read_status, status_path, write_status
 from jef.tasks import TaskList, TaskStatus
 from jef.usage import Usage, agent_usage, format_cost, format_tokens, project_total, project_usage
 from jef.workspace import Workspace
@@ -34,16 +35,35 @@ class ProjectSummary:
     total: int
     counts: dict[TaskStatus, int]
     usage: Usage = Usage()
+    # From status.md, so the home page needs no LLM call to show them.
+    phase: str = ""
+    coordinator: str = ""
+    coordinator_status: str = ""
+    problem: str = ""
 
     @property
     def merged(self) -> int:
         return self.counts[TaskStatus.MERGED]
 
 
+def split_coordinator(value: str) -> tuple[str, str]:
+    """"Katherine (Idle)" -> ("Katherine", "Idle"); "none" -> ("", "")."""
+    value = value.strip()
+    if not value or value == "none":
+        return "", ""
+    name, paren, rest = value.rpartition(" (")
+    if paren and rest.endswith(")"):
+        return name, rest[:-1]
+    return value, ""
+
+
 def summarize_projects(ws: Workspace) -> list[ProjectSummary]:
     summaries = []
     for slug in ws.project_slugs():
         tasks = TaskList.load(ws.project_dir(slug) / "tasks.md")
+        status = read_status(ws, slug)
+        coordinator, coordinator_status = split_coordinator(status.get("coordinator", ""))
+        problem = status.get("problem", "")
         summaries.append(
             ProjectSummary(
                 slug=slug,
@@ -51,9 +71,24 @@ def summarize_projects(ws: Workspace) -> list[ProjectSummary]:
                 total=len(tasks.tasks),
                 counts=tasks.counts(),
                 usage=project_total(ws, slug),
+                phase=status.get("phase", ""),
+                coordinator=coordinator,
+                coordinator_status=coordinator_status,
+                problem="" if problem == "none" else problem,
             )
         )
     return summaries
+
+
+def refresh_statuses(ws: Workspace, roster: Callable[[str], list[Agent]] | None = None) -> int:
+    """Rewrite every project's status.md from its files. ``roster`` gives a
+    project's agents (Chats.refresh when Claude Code works); without it the
+    saved agents.md is read. No LLM or GitHub call. Returns how many changed."""
+    changed = 0
+    for slug in ws.project_slugs():
+        agents = roster(slug) if roster else load_roster(ws, slug)
+        changed += write_status(ws, slug, agents)
+    return changed
 
 
 def ago(seconds: float) -> str:
@@ -119,7 +154,7 @@ def create_app(
         return pages
 
     @app.get("/", response_class=HTMLResponse)
-    def home(request: Request, error: str = ""):
+    def home(request: Request, error: str = "", status: str = ""):
         backlog = Backlog.load(ws.backlog_file)
         jef_runner = get_jef_chats()
         jef_agent = jefchat.agent(jef_runner) if jef_runner else None
@@ -141,8 +176,28 @@ def create_app(
                 "waiting": BacklogStatus.WAITING,
                 "done": BacklogStatus.DONE,
                 "error": error,
+                "status_read": status == "read",
             },
         )
+
+    @app.post("/status/refresh")
+    def refresh_status():
+        """The Read status button: rewrite every status.md from Jef's own
+        files. No LLM or GitHub call, and nobody is nudged."""
+        flow = get_pipeline()
+        if flow is not None:
+            for slug in ws.project_slugs():
+                flow.write_status(slug)
+        else:
+            refresh_statuses(ws)
+        return RedirectResponse("/?status=read#projects", status_code=303)
+
+    @app.get("/projects/{slug}/status", response_class=PlainTextResponse)
+    def project_status(slug: str):
+        path = status_path(ws, slug)
+        if known(slug) is None or not path.exists():
+            return PlainTextResponse("No status yet.\n", status_code=404)
+        return PlainTextResponse(path.read_text(encoding="utf-8"))
 
     @app.post("/jef/message")
     def message_jef(message: str = Form("")):
@@ -265,6 +320,7 @@ def create_app(
                 "phases": Phase,
                 "problem": flow.problem(slug) if flow else "",
                 "research": flow.research(slug) if flow else "",
+                "status_text": status_path(ws, slug).read_text(encoding="utf-8") if status_path(ws, slug).exists() else "",
                 "heartbeat": flow.heartbeat_minutes(slug) if flow else 60,
                 "coordinator_decides": flow.coordinator_decides(slug) if flow else True,
                 "last_checked": ago(flow.now() - checked) if checked is not None else "",

@@ -2,9 +2,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from jef.backlog import Backlog
+from jef.chats import Agent, Role, Status, save_roster
 from jef.github import GitHubStatus
 from jef.claude import ClaudeCheck
-from jef.web.app import create_app
+from jef.status import read_status
+from jef.web.app import create_app, split_coordinator
 from jef.workspace import Workspace
 
 @pytest.fixture
@@ -48,6 +50,80 @@ def test_projects_show_merged_counts(ws, client):
     page = client.get("/")
     assert "To-do list app" in page.text
     assert "1 of 2" in page.text
+
+
+def make_status_project(ws, slug="show-version", research="done"):
+    folder = ws.project_dir(slug)
+    folder.mkdir(parents=True)
+    (folder / "goal.md").write_text(
+        f"# Goal: Show the version\n\n- Repo: o/r\n- Coordinator: Ada\n- Research: {research}\n\n## What you asked for\n\nIt.\n",
+        encoding="utf-8",
+    )
+    save_roster(ws, slug, [Agent("ada", Role.COORDINATOR, "s", "/f", status=Status.WORKING, note="Writing | tasks")])
+    return slug
+
+
+def test_read_status_writes_every_status_file_and_shows_stage_and_coordinator(ws, client):
+    make_status_project(ws)
+    make_status_project(ws, "second", research="started")
+    assert "Read status" in client.get("/").text
+
+    page = client.post("/status/refresh")  # no Claude Code: reads agents.md
+
+    assert page.status_code == 200
+    assert "Just read." in page.text
+    assert read_status(ws, "show-version")["phase"] == "Planning"
+    assert read_status(ws, "second")["phase"] == "Research"
+    assert "Planning" in page.text and "Research" in page.text
+    assert "Ada</a>" in page.text and ">Working</span>" in page.text
+
+
+def test_read_status_doesnt_rewrite_unchanged_files(ws, client):
+    slug = make_status_project(ws)
+    client.post("/status/refresh")
+    path = ws.project_dir(slug) / "status.md"
+    path.write_text(path.read_text().replace("- Updated:", "- Updated: kept"))
+    client.post("/status/refresh")
+    assert "- Updated: kept" in path.read_text()
+
+
+def test_read_status_uses_the_pipeline_when_there_is_one(ws):
+    slug = make_status_project(ws)
+    written = []
+
+    class FakePipeline:
+        def write_status(self, s):
+            written.append(s)
+            return True
+
+    client = TestClient(create_app(ws, github_check=lambda: GitHubStatus(True, "o"), pipeline=FakePipeline()))
+    client.post("/status/refresh")
+    assert written == [slug]
+
+
+def test_project_status_is_plain_text(ws, client):
+    slug = make_status_project(ws)
+    assert client.get(f"/projects/{slug}/status").status_code == 404
+    client.post("/status/refresh")
+    response = client.get(f"/projects/{slug}/status")
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text.startswith("# Status: Show the version")
+    assert "- Coordinator: Ada (Working)" in response.text
+    assert client.get("/projects/nope/status").status_code == 404
+
+
+def test_split_coordinator():
+    assert split_coordinator("Katherine (Idle)") == ("Katherine", "Idle")
+    assert split_coordinator("Ada (not started)") == ("Ada", "not started")
+    assert split_coordinator("none") == ("", "")
+    assert split_coordinator("") == ("", "")
+
+
+def test_projects_without_a_status_file_show_dashes(ws, client):
+    make_status_project(ws)
+    page = client.get("/")
+    assert "Show the version" in page.text or "show-version" in page.text
+    assert "—" in page.text
 
 
 def test_user_text_is_escaped(client):

@@ -77,16 +77,22 @@
     {% if error == "delete" %}<p class="error">That item can't be deleted while it's in progress.</p>{% endif %}
   </section>
 
-  <section>
+  <section id="projects">
     <h2>Projects</h2>
     <p class="hint">How every started project is going.</p>
     {% if projects %}
+    <form method="post" action="/status/refresh" class="check">
+      <button type="submit" class="secondary">Read status</button>
+      <span class="hint">Reads each coordinator's status file. No AI calls, no tokens.{% if status_read %} Just read.{% endif %}</span>
+    </form>
     <table>
-      <thead><tr><th>Project</th><th>Tasks merged</th><th>Progress</th><th>Est. cost</th></tr></thead>
+      <thead><tr><th>Project</th><th>Stage</th><th>Coordinator</th><th>Tasks merged</th><th>Progress</th><th>Est. cost</th></tr></thead>
       <tbody>
       {% for p in projects %}
         <tr>
           <td><a href="/projects/{{ p.slug }}">{{ p.name }}</a></td>
+          <td>{{ p.phase or "—" }}{% if p.problem %}<br><span class="error">{{ p.problem }}</span>{% endif %}</td>
+          <td>{% if p.coordinator %}<a href="/projects/{{ p.slug }}">{{ p.coordinator }}</a>{% if p.coordinator_status %} <span class="pill {{ p.coordinator_status | lower | replace(' ', '-') }}">{{ p.coordinator_status }}</span>{% endif %}{% else %}—{% endif %}</td>
           <td>{{ p.merged }} of {{ p.total }}</td>
           <td>
             <div class="bar" role="img" aria-label="{% for s in statuses %}{{ p.counts[s] }} {{ s.value }}{% if not loop.last %}, {% endif %}{% endfor %}">
