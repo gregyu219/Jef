@@ -49,9 +49,11 @@
             {% else %}{{ item.coordinator or "—" }}{% endif %}
           </td>
           <td>
-            {% if item.status == waiting %}
+            {% if item.status == waiting or item.status == done %}
+            {% if item.status == done %}{% set question = "Remove “" ~ item.feature ~ "” from the backlog? Its project and PRs stay." %}
+            {% else %}{% set question = "Delete “" ~ item.feature ~ "” from the backlog?" %}{% endif %}
             <form method="post" action="/backlog/{{ item.number }}/delete" class="inline"
-                  onsubmit='return confirm({{ ("Delete “" ~ item.feature ~ "” from the backlog?") | tojson }})'>
+                  onsubmit='return confirm({{ question | tojson }})'>
               <button type="submit" class="secondary small" aria-label="Delete backlog item {{ item.number }}">Delete</button>
             </form>
             {% endif %}
@@ -68,7 +70,7 @@
       <button type="submit">Add to backlog</button>
     </form>
     {% if error == "empty" %}<p class="error">Type a description first.</p>{% endif %}
-    {% if error == "delete" %}<p class="error">That item can't be deleted. Only items that haven't started can be.</p>{% endif %}
+    {% if error == "delete" %}<p class="error">That item can't be deleted while it's in progress.</p>{% endif %}
   </section>
 
   <section>
