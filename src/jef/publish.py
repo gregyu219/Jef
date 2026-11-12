@@ -106,3 +106,9 @@ class Publisher:
         if not url:
             raise PublishError(f"`gh pr create` didn't return a PR link: {out[:200]}")
         return url
+
+    def comment(self, work: Path, url: str, text: str) -> None:
+        """Leave a short note on a PR, like why its branch was rewritten."""
+        if find_secrets_in_text(text):
+            raise PublishError("The comment looks like it contains a secret.")
+        self._cmd(work, "gh", "pr", "comment", url, "--body", text)

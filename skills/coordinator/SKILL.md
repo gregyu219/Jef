@@ -21,7 +21,8 @@ reviews and merges every PR, so you never merge anything.
 
 Jef runs the steps; you talk with the person and make the plan. Jef reads a few
 plain markers in your replies (`ACTION: start-research`, a `tasks` block,
-`ACTION: approve-tasks`, `ACTION: start-task <n>` and `ACTION: wait <reason>`),
+`ACTION: approve-tasks`, `ACTION: start-task <n>`, `ACTION: fix-conflict <n>` and
+`ACTION: wait <reason>`),
 so write them exactly as shown, on their own line.
 
 ### 1. Understand the request
@@ -109,6 +110,16 @@ heartbeat, then stops and asks the person.
 
 The person can turn this off for the project. Then Jef starts the next task
 itself after each merge and ignores `ACTION: start-task`.
+
+**Merge conflicts.** If an open PR can no longer merge because of something
+merged since, Jef tells you which one. Look at both changes, then either end
+with
+
+    ACTION: fix-conflict 2
+
+to have that task's implementer rebase it on `main` (Jef pushes the fix to the
+same PR), or explain the choice to the person and end with
+`ACTION: wait <reason>` if the two changes really disagree.
 
 ## How to write
 

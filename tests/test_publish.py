@@ -32,6 +32,8 @@ def setup(tmp_path):
             gh_calls.append(cmd)
             if cmd[1:3] == ["pr", "list"]:
                 return subprocess.CompletedProcess(cmd, 0, open_prs.get("url", ""), "")
+            if cmd[1:3] == ["pr", "comment"]:
+                return subprocess.CompletedProcess(cmd, 0, "", "")
             body = Path(cmd[cmd.index("--body-file") + 1]).read_text()
             gh_calls.append(["body", body])
             open_prs["url"] = "https://github.com/o/r/pull/7"
@@ -61,6 +63,33 @@ def test_pushes_the_branch_and_opens_the_pr(setup):
     commit(work, "more.txt", "more\n")
     assert publisher.publish(work, "jef/demo/task-1", "main", "Say hi", "x") == url
     assert sum(1 for c in gh_calls if c[:3] == ["gh", "pr", "create"]) == 1
+
+
+def test_a_branch_rebased_after_a_conflict_goes_to_the_same_pr(setup, tmp_path):
+    work, origin, publisher, gh_calls = setup
+    commit(work, "footer.txt", "version 1\n")
+    url = publisher.publish(work, "jef/demo/task-1", "main", "Footer", "b")
+    # Someone else's change to the same file is merged into main.
+    other = tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(origin), str(other))
+    commit(other, "footer.txt", "version two\n")
+    git(other, "push", "-q", "origin", "main")
+    # The implementer rebases, resolves the conflict and carries on, as Jef asks.
+    git(work, "fetch", "-q", "origin")
+    rebase = subprocess.run(["git", "rebase", "origin/main"], cwd=work, capture_output=True, text=True)
+    assert rebase.returncode != 0  # the conflict
+    (work / "footer.txt").write_text("version two, and 1\n")
+    git(work, "add", "footer.txt")
+    git(work, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.editor=true", "rebase", "--continue")
+    # The rewritten branch is force-pushed (with lease) to the same PR.
+    assert publisher.publish(work, "jef/demo/task-1", "main", "Footer", "b") == url
+    assert sum(1 for c in gh_calls if c[:3] == ["gh", "pr", "create"]) == 1
+    pushed = subprocess.run(["git", "show", "jef/demo/task-1:footer.txt"], cwd=origin, capture_output=True, text=True).stdout
+    assert pushed == "version two, and 1\n"
+    publisher.comment(work, url, "Jef: rebased on main to fix merge conflicts.")
+    assert ["gh", "pr", "comment", url, "--body", "Jef: rebased on main to fix merge conflicts."] in gh_calls
+    with pytest.raises(PublishError):
+        publisher.comment(work, url, FAKE_KEY)
 
 
 def test_refuses_to_push_secrets(setup):

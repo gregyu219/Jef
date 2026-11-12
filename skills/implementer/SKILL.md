@@ -76,3 +76,20 @@ Jef checks in on a heartbeat. End every reply with exactly one status line:
 
 If you're told your PR is already open and asked for changes, make them,
 commit, and report `STATUS: ready` again; Jef pushes the update to the same PR.
+
+## When your PR has merge conflicts
+
+Other tasks may be merged into `main` while your PR waits for review. If they
+conflict with your branch, Jef asks you to fix it. Rebase on the latest
+`main`, one command at a time:
+
+1. `git fetch origin`
+2. `git rebase origin/main`
+3. For each conflicted file, edit it so both sides' changes still do what they
+   meant, then `git add <file>` and `git -c core.editor=true rebase --continue`.
+4. Run the tests.
+
+Then report `STATUS: ready` with your `pr` block again. Jef pushes the rebased
+branch to the **same** PR and notes on it why it changed. If both sides can't
+be kept, run `git rebase --abort` and report `STATUS: stuck` with the decision
+that's needed.

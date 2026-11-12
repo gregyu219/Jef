@@ -49,16 +49,24 @@ class FakeGit:
 class FakePublisher:
     def __init__(self):
         self.calls = []
+        self.comments = []
         self.fail = None
         self.next_pr = 20
+        self.open = {}  # branch -> its open PR, reused like the real publisher
 
     def publish(self, work, branch, base, title, body):
         self.calls.append((branch, base, title, body))
         if self.fail:
             raise PublishError(self.fail)
+        if branch in self.open:
+            return self.open[branch]
         url = f"https://github.com/gregyu219/Jef/pull/{self.next_pr}"
         self.next_pr += 1
+        self.open[branch] = url
         return url
+
+    def comment(self, work, url, text):
+        self.comments.append((url, text))
 
 
 READY = "Done.\n```pr\nTitle: Show the version\n\n## What this does\nShows it.\n```\nSTATUS: ready"
@@ -72,11 +80,13 @@ class World:
         backlog.save(self.ws.backlog_file)
         self.procs = {}
         self.pr_states = {}
+        self.mergeable = {}
         self.clock = 1_000_000.0
         self.chats = Chats(self.ws, "/bin/claude", popen=self.popen)
         self.git = FakeGit()
         self.publisher = FakePublisher()
-        self.pipeline = Pipeline(self.ws, self.chats, git=self.git, publisher=self.publisher, pr_state=lambda url: self.pr_states.get(url, "OPEN"), now=lambda: self.clock)
+        self.pipeline = Pipeline(self.ws, self.chats, git=self.git, publisher=self.publisher, pr_state=lambda url: self.pr_states.get(url, "OPEN"),
+                                 pr_mergeable=lambda url: self.mergeable.get(url, "MERGEABLE"), now=lambda: self.clock)
         project = start_project(self.ws, 1, "gregyu219/Jef", self.chats, clone=lambda repo, dest: dest.mkdir(parents=True), choose_name=lambda names: sorted(names)[0])
         self.slug = project.slug
 
@@ -694,3 +704,96 @@ def test_coordinator_starts_toggle_on_the_page(w):
     c.post(f"/projects/{w.slug}/coordinator-starts", data={"on": "no"})
     assert not w.pipeline.coordinator_starts(w.slug)
     assert "Jef starts the next task straight away" in c.get(f"/projects/{w.slug}").text
+
+
+# ---- merge conflicts on open PRs
+
+PR20 = "https://github.com/gregyu219/Jef/pull/20"
+
+
+def pr_open_for_review(w):
+    approved_with_one_task(w)
+    w.reply("impl-1", READY)
+    assert w.pipeline.tasks(w.slug).tasks[0].pr == PR20
+
+
+def test_a_conflict_is_noticed_and_the_coordinator_decides(w):
+    pr_open_for_review(w)
+    w.mergeable[PR20] = "CONFLICTING"
+    w.pipeline.check_now(w.slug)
+    assert w.agent("impl-1").note == "PR has conflicts with main"
+    assert "ACTION: fix-conflict 1" in w.last_message("ada")
+    assert w.pipeline.conflict(w.slug) == ("asked", 1)
+    turns = len(w.procs["ada"])
+    w.pipeline.check_now(w.slug)
+    assert len(w.procs["ada"]) == turns  # asked once, not on every check
+
+    w.reply("ada", "Rebase it.\nACTION: fix-conflict 1")
+    assert "git rebase origin/main" in w.last_message("impl-1")
+    assert w.pipeline.conflict(w.slug) == ("fixing", 1)
+    assert w.agent("impl-1").note == "Fixing merge conflicts (asked by Ada)"
+
+    # Fixed: Jef pushes to the same PR and says why on it.
+    w.mergeable[PR20] = "MERGEABLE"
+    w.reply("impl-1", READY)
+    assert len(w.publisher.calls) == 2 and w.pipeline.tasks(w.slug).tasks[0].pr == PR20
+    assert w.agent("impl-1").note == "Conflicts fixed, PR updated, waiting for your review"
+    assert w.publisher.comments == [(PR20, "Jef: rebased on main to fix merge conflicts.")]
+    assert w.pipeline.conflict(w.slug) is None
+
+
+def test_the_coordinator_can_wait_on_a_conflict(w):
+    pr_open_for_review(w)
+    w.mergeable[PR20] = "CONFLICTING"
+    w.pipeline.check_now(w.slug)
+    w.reply("ada", "These two disagree.\nACTION: wait choose between the old and new footer")
+    assert "Ada is waiting for you: choose between the old and new footer" in w.pipeline.problem(w.slug)
+    assert w.pipeline.conflict(w.slug) is None
+    turns = len(w.procs["ada"])
+    w.pipeline.check_now(w.slug)
+    assert len(w.procs["ada"]) == turns  # not asked again while waiting for you
+    w.pipeline.clear_problem(w.slug)
+    w.pipeline.check_now(w.slug)
+    assert "ACTION: fix-conflict 1" in w.last_message("ada")
+
+
+def test_a_conflict_fixed_on_github_needs_nothing(w):
+    pr_open_for_review(w)
+    w.mergeable[PR20] = "CONFLICTING"
+    w.pipeline.check_now(w.slug)
+    w.mergeable[PR20] = "MERGEABLE"
+    w.pipeline.check_now(w.slug)
+    assert w.pipeline.conflict(w.slug) is None
+
+
+def test_turned_off_jef_sends_the_conflict_straight_to_the_implementer(w):
+    w.pipeline.set_coordinator_starts(w.slug, False)
+    pr_open_for_review(w)
+    w.mergeable[PR20] = "CONFLICTING"
+    turns = len(w.procs["ada"])
+    w.pipeline.check_now(w.slug)
+    assert len(w.procs["ada"]) == turns
+    assert "git rebase origin/main" in w.last_message("impl-1")
+    assert w.agent("impl-1").note == "Fixing merge conflicts (asked by Jef)"
+
+
+def test_a_merge_makes_every_project_check_its_prs(w):
+    other = w.ws.project_dir("other-project")
+    other.mkdir(parents=True)
+    (other / "goal.md").write_text("# Goal: Other\n\n- Repo: gregyu219/Jef\n")
+    w.pipeline._last_pr_check["other-project"] = w.clock
+    pr_open_for_review(w)
+    w.pr_states[PR20] = "MERGED"
+    w.pipeline.check_now(w.slug)
+    assert w.pipeline._last_pr_check["other-project"] == float("-inf")
+
+
+def test_a_new_pr_links_the_closed_one(w):
+    pr_open_for_review(w)
+    w.pr_states[PR20] = "CLOSED"
+    w.publisher.open.clear()  # GitHub has no open PR for the branch any more
+    w.chats.send(w.slug, "impl-1", "The PR was closed; open it again")
+    w.reply("impl-1", READY)
+    assert w.publisher.calls[-1][3].startswith(f"Replaces {PR20}, which was closed without merging.")
+    assert w.pipeline.tasks(w.slug).tasks[0].pr == "https://github.com/gregyu219/Jef/pull/21"
+    assert w.agent("impl-1").note == "PR opened, waiting for your review"

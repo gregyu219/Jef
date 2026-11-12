@@ -28,6 +28,8 @@ Agents only reply in text. Jef reads a few plain markers in those replies:
 - after a PR merges, the coordinator ends with ``ACTION: start-task <n>`` to start
   the next task (after revising the remaining tasks in a ``tasks`` block, if
   needed), or ``ACTION: wait <reason>`` if it needs you first,
+- when an open PR has merge conflicts, the coordinator ends with
+  ``ACTION: fix-conflict <n>`` and Jef sends the task back to its implementer,
 - implementers end with ``STATUS: working | ready | stuck <reason>``; with ``ready``
   they include a ``pr`` block, and Jef pushes the branch and opens the PR itself.
 
@@ -74,6 +76,7 @@ MAX_CONTEXT_CHARS = 30_000
 ACTION_START_RESEARCH = re.compile(r"^\s*ACTION:\s*start-research\s*$", re.I | re.M)
 ACTION_APPROVE_TASKS = re.compile(r"^\s*ACTION:\s*approve-tasks\s*$", re.I | re.M)
 ACTION_START_TASK = re.compile(r"^\s*ACTION:\s*start-task\s+#?(\d+)\s*$", re.I | re.M)
+ACTION_FIX_CONFLICT = re.compile(r"^\s*ACTION:\s*fix-conflict\s+#?(\d+)\s*$", re.I | re.M)
 ACTION_WAIT = re.compile(r"^\s*ACTION:\s*wait\b[ \t:]*(.*?)\s*$", re.I | re.M)
 # The Problem field says this when the coordinator asked to wait for you.
 WAITING = "is waiting for you: "
@@ -115,6 +118,11 @@ def parse_start_task(text: str) -> int | None:
     return int(found[-1]) if found else None
 
 
+def parse_fix_conflict(text: str) -> int | None:
+    found = ACTION_FIX_CONFLICT.findall(text)
+    return int(found[-1]) if found else None
+
+
 def parse_wait(text: str) -> str | None:
     """The reason in the last ``ACTION: wait <reason>`` line, or None."""
     found = ACTION_WAIT.findall(text)
@@ -153,6 +161,7 @@ def without_markers(text: str) -> str:
     text = ACTION_APPROVE_TASKS.sub("", text)
     text = ACTION_START_TASK.sub("", text)
     text = ACTION_WAIT.sub("", text)
+    text = ACTION_FIX_CONFLICT.sub("", text)
     return ACTION_START_RESEARCH.sub("", text).strip()
 
 
@@ -211,6 +220,19 @@ def gh_pr_state(url: str) -> str:
     return result.stdout.strip().upper() if result.returncode == 0 else ""
 
 
+def gh_pr_mergeable(url: str) -> str:
+    """MERGEABLE, CONFLICTING or UNKNOWN (GitHub is still working it out),
+    or "" if GitHub couldn't be asked."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", url, "--json", "mergeable", "--jq", ".mergeable"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip().upper() if result.returncode == 0 else ""
+
+
 # ---- the pipeline
 
 
@@ -221,6 +243,7 @@ class Pipeline:
     git: Git = field(default_factory=Git)
     publisher: Publisher = field(default_factory=Publisher)
     pr_state: Callable[[str], str] = gh_pr_state
+    pr_mergeable: Callable[[str], str] = gh_pr_mergeable
     now: Callable[[], float] = time.time
     _last_beat: dict[str, float] = field(default_factory=dict)
     _last_pr_check: dict[str, float] = field(default_factory=dict)
@@ -429,6 +452,9 @@ class Pipeline:
             self._send_back(slug, agent, "There's no ```pr block with the PR title and description. Add one and report ready again.")
             return
         title, body = pr if pr else (task.title, "")
+        if task.pr and self.pr_state(task.pr) == "CLOSED":
+            # Jef only opens a new PR when the old one was closed; link it.
+            body = f"Replaces {task.pr}, which was closed without merging.\n\n" + (body or task.title)
         try:
             url = self.publisher.publish(
                 Path(agent.folder), self._branch(slug, task), self.git.default_branch(self.folder(slug) / "repo"),
@@ -437,11 +463,23 @@ class Pipeline:
         except (PublishError, OSError, subprocess.SubprocessError) as err:
             self._send_back(slug, agent, str(err))
             return
-        updated = bool(task.pr)
+        updated = bool(task.pr) and task.pr == url
         task.status = TaskStatus.PENDING_REVIEW
         task.pr = url
         tasks.save(self.folder(slug) / "tasks.md")
         agent.note = "PR updated, waiting for your review" if updated else "PR opened, waiting for your review"
+        if self.conflict(slug) == ("fixing", task.number):
+            self._set_conflict(slug, "none")
+            agent.note = "Conflicts fixed, PR updated, waiting for your review"
+            merged = goal_fields(self.workspace, slug).get("last merged", "")
+            try:
+                self.publisher.comment(
+                    Path(agent.folder), url,
+                    "Jef: rebased on main to fix merge conflicts"
+                    + (f" with {pr_label(merged).removeprefix('PR ')}." if merged else "."),
+                )
+            except (PublishError, OSError, subprocess.SubprocessError):
+                pass  # the fix is pushed; the comment is only a courtesy
 
     def _send_back(self, slug: str, agent: Agent, problem: str) -> None:
         """Tell the implementer what to fix, a few times at most."""
@@ -463,12 +501,15 @@ class Pipeline:
         changes nothing, so talking about the plan can't drop tasks by accident."""
         start = parse_start_task(text)
         wait = parse_wait(text)
-        if start is None and wait is None:
+        fix = parse_fix_conflict(text)
+        if start is None and wait is None and fix is None:
             return
         if not self.coordinator_starts(slug):
             agent.note = "Tried to start a task, but Jef starts tasks itself for this project"
             return
         notes = []
+        if fix is not None:
+            notes.append(self._fix_conflict(slug, fix, asked_by=load_project(self.workspace, slug).coordinator))
         if start is not None:
             revised = parse_numbered_tasks(text)
             if revised:
@@ -478,6 +519,9 @@ class Pipeline:
             project = load_project(self.workspace, slug)
             set_goal_field(self.workspace, slug, "Problem", _short(f"{project.coordinator} {WAITING}{wait}", 300))
             set_goal_field(self.workspace, slug, "Next task asked", "no")
+            if fix is None:
+                # Ask again about any conflict once you press Try again.
+                set_goal_field(self.workspace, slug, "Conflict", "none")
             notes.append("Waiting: " + _short(wait))
         agent.note = ". ".join(notes)
 
@@ -559,6 +603,68 @@ class Pipeline:
             f"{project.coordinator} hasn't said which task to start next. Ask in the chat, or press Try again to ask again.",
         )
         set_goal_field(self.workspace, slug, "Next task asked", "no")
+
+    # -- merge conflicts
+
+    def conflict(self, slug: str) -> tuple[str, int] | None:
+        """("asked" | "fixing", task number) while a PR's conflicts are being handled."""
+        value = goal_fields(self.workspace, slug).get("conflict", "").split()
+        if len(value) == 2 and value[0] in ("asked", "fixing") and value[1].isdigit():
+            return value[0], int(value[1])
+        return None
+
+    def _set_conflict(self, slug: str, value: str) -> None:
+        set_goal_field(self.workspace, slug, "Conflict", value)
+
+    def _on_conflict(self, slug: str, task: Task) -> None:
+        """An open PR can't merge any more. Ask the coordinator what to do, or,
+        if the coordinator doesn't start tasks for this project, send the task
+        straight back to its implementer."""
+        if self.conflict(slug) or self.problem(slug):
+            return  # already on it, or waiting for you
+        agent = self._agent(slug, task.agent) if task.agent else None
+        if agent is not None and not agent.note.startswith("PR has conflicts"):
+            agent.note = "PR has conflicts with main"
+            self.chats.update(slug, agent)
+        if not self.coordinator_starts(slug):
+            self._fix_conflict(slug, task.number, asked_by="Jef")
+            return
+        project = load_project(self.workspace, slug)
+        coordinator = self._agent(slug, project.coordinator_agent)
+        if coordinator is None or coordinator.status is not Status.IDLE:
+            return  # ask at the next check
+        try:
+            self.git.fetch(self.folder(slug) / "repo")
+        except (PipelineError, OSError, subprocess.SubprocessError):
+            pass
+        try:
+            self.chats.send(slug, coordinator.name, self._conflict_message(slug, task), sender="jef")
+        except ChatError:
+            return
+        self._set_conflict(slug, f"asked {task.number}")
+
+    def _fix_conflict(self, slug: str, number: int, asked_by: str) -> str:
+        """Send the task back to its implementer to rebase on main. Jef then
+        pushes the fixed branch to the same PR."""
+        task = next((t for t in self.tasks(slug).tasks if t.number == number), None)
+        if task is None or task.status is not TaskStatus.PENDING_REVIEW or not task.pr:
+            return f"Asked to fix conflicts on task {number}, but it has no PR waiting for review"
+        agent = self._agent(slug, task.agent) if task.agent else None
+        if agent is None or agent.status is Status.STOPPED:
+            set_goal_field(
+                self.workspace, slug, "Problem",
+                f"{pr_label(task.pr)} has merge conflicts, but its implementer has stopped. Fix it on GitHub, or close the PR.",
+            )
+            self._set_conflict(slug, "none")
+            return f"Asked to fix conflicts on task {number}, but its implementer has stopped"
+        try:
+            self.chats.send(slug, agent.name, self._conflict_fix_message(slug, task), sender="jef")
+        except ChatError as err:
+            return f"Couldn't ask {agent.name} to fix the conflicts yet: {err}"
+        self._set_conflict(slug, f"fixing {number}")
+        agent.note = f"Fixing merge conflicts (asked by {asked_by})"
+        self.chats.update(slug, agent)
+        return f"Asked {agent.name} to fix the conflicts on task {number}"
 
     def _branch(self, slug: str, task: Task) -> str:
         return f"jef/{slug}/task-{task.number}"
@@ -671,11 +777,26 @@ class Pipeline:
                 changed = True
                 set_goal_field(self.workspace, slug, "Last merged", task.pr)
                 set_goal_field(self.workspace, slug, "Next task asked", "no")
+                if self.conflict(slug) and self.conflict(slug)[1] == task.number:
+                    self._set_conflict(slug, "none")  # fixed on GitHub and merged
+                # A merge is what usually causes conflicts, so every project's
+                # open PRs (other projects may share the repo) get checked at
+                # their next tick.
+                for other in self.workspace.project_slugs():
+                    if other != slug:
+                        self._last_pr_check[other] = float("-inf")
                 if agent is not None and agent.status is not Status.STOPPED:
                     self.chats.stop(slug, agent.name)
             elif state == "CLOSED" and agent is not None:
                 agent.note = "PR was closed without merging. Tell the coordinator what to do."
                 self.chats.update(slug, agent)
+            elif state == "OPEN":
+                mergeable = self.pr_mergeable(task.pr)
+                handling = self.conflict(slug)
+                if mergeable == "CONFLICTING":
+                    self._on_conflict(slug, task)
+                elif mergeable == "MERGEABLE" and handling == ("asked", task.number):
+                    self._set_conflict(slug, "none")  # someone fixed it on GitHub
         if changed:
             tasks.save(self.folder(slug) / "tasks.md")
 
@@ -778,6 +899,35 @@ class Pipeline:
             "that have started, then end with `ACTION: start-task <number>`.\n"
             "- If you need the person's answer first, ask it and end with `ACTION: wait <reason>`. "
             "Jef shows the reason on the project page and starts nothing."
+        )
+
+    def _conflict_message(self, slug: str, task: Task) -> str:
+        merged = goal_fields(self.workspace, slug).get("last merged", "")
+        base = self.git.default_branch(self.folder(slug) / "repo")
+        return (
+            f"{pr_label(task.pr)} ({task.pr}) for task {task.number}, {task.title}, can't be merged any more: "
+            f"it has conflicts with the latest `{base}`"
+            + (f", probably because {pr_label(merged)} ({merged}) was merged" if merged else "")
+            + f". Look at both with `gh pr view` and `git log origin/{base}`, then choose one:\n"
+            f"- To have the implementer rebase it on `{base}`, keeping what both sides meant, end with "
+            f"`ACTION: fix-conflict {task.number}`. Jef pushes the fix to the same PR.\n"
+            "- If the two changes really disagree and the person has to choose, explain the choice and "
+            "end with `ACTION: wait <reason>`."
+        )
+
+    def _conflict_fix_message(self, slug: str, task: Task) -> str:
+        base = self.git.default_branch(self.folder(slug) / "repo")
+        return (
+            f"Your PR {task.pr} can't be merged: other work merged into `{base}` since you started, "
+            f"and it conflicts with your branch. Fix it on your branch, one command at a time:\n\n"
+            "1. `git fetch origin`\n"
+            f"2. `git rebase origin/{base}`\n"
+            "3. For each conflicted file, edit it so both sides' changes still do what they meant, then "
+            "`git add <file>` and `git -c core.editor=true rebase --continue`.\n"
+            "4. Run the tests.\n\n"
+            "Then report `STATUS: ready` with your ```pr block (same title; say under Testing that you "
+            "rebased and fixed conflicts). Jef pushes your branch to the same PR. If both sides can't be "
+            "kept, run `git rebase --abort` and report `STATUS: stuck` with the decision that's needed."
         )
 
     def _next_task_reminder(self) -> str:
