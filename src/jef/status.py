@@ -147,6 +147,8 @@ def render_status(ws: Workspace, slug: str, agents: list[Agent], now: datetime |
             f"- Tasks: {merged} of {len(tasks)} merged" if tasks else "- Tasks: none yet",
             f"- Implementers at once: {implementers_at_once(ws, slug)}",
             f"- Auto approve: {'on' if auto_approve(ws, slug) else 'off'}",
+            # Tasks built on another task's unmerged branch, so the coordinator knows who to rebase.
+            *([f"- Stacked: {_one_line(fields['stacked'])}"] if fields.get("stacked") else []),
             f"{UPDATED} {stamp}",
             "",
         ]

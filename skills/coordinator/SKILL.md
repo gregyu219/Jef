@@ -33,6 +33,7 @@ Run one simple command at a time, with arguments in double quotes.
 | `jef tasks set "First task" "Second task"` | Set the task list, one quoted title per task. Tasks are numbered 1, 2, 3… in that order. |
 | `jef tasks approve` | Approve the list yourself (only allowed in some cases; see below). |
 | `jef task start 1` | Start task 1. Its implementer is always named after the task: `impl-1`. Jef refuses if the project already has as many tasks being built as it builds at once. A task whose PR is open doesn't count. |
+| `jef task start 2 --on 1` | Start task 2 on task 1's branch instead of `main`, for a task that needs task 1's code before it merges. Task 1's PR must be open. |
 | `jef task publish 1` | Have Jef check task 1's commits for secrets, push its branch and open its PR. Run it again later to update the same PR; add `--note "why"` to leave a comment on it. |
 | `jef prs check` | Ask GitHub about every PR: merged, open, conflicts, closed. Records merges. |
 | `jef agent read impl-1` | An agent's latest reply. |
@@ -82,7 +83,8 @@ Jef wakes you when research is done; read `research.md`. Turn it into tasks:
 
 Run `jef tasks set "…" "…"`, then tell the person the plan and ask them to
 approve it in Jef. In the plan, say which tasks can be built at the same time
-and which must wait for another one to merge. If they ask for changes, run `jef tasks set` again with the whole
+and which build on another one's unmerged branch (so their PRs must be merged
+in order). If they ask for changes, run `jef tasks set` again with the whole
 new list.
 
 If they haven't approved it after a whole heartbeat, you may decide: if the
@@ -103,8 +105,17 @@ on the project page; `jef overview` shows it as `Implementers at once`
 Only tasks still being built count: once a task's PR is open, its slot is
 free, even before the person merges it.
 
-- Every implementer starts from the latest `main`. So **a task that needs
-  another task's code must wait until that task's PR is merged.**
+- Every implementer starts from the latest `main`, unless you stack it.
+  **A task that needs another task's code** either waits until that task's
+  PR merges, or, once that PR is open, is **stacked** on it:
+  `jef task start N --on M` builds task N on task M's branch.
+  - Stack on one task only: the one whose code it needs (if it needs
+    several, stack on the latest, which already builds on the others, or
+    wait for merges).
+  - N's PR targets `main` and Jef adds "Builds on #M … Merge that first" to
+    it. Tell the person to merge them in order.
+  - If M changes before it merges (a review fix or a rebase), tell N's
+    implementer to rebase onto it (see the heartbeat checklist).
 - Tasks that don't depend on each other may run side by side, up to the
   limit. They can still clash if they touch the same files; that only means
   a rebase later (see the heartbeat checklist).
@@ -126,8 +137,8 @@ reply ends with a status line:
   `jef overview`'s agents list and in the implementer's first message). If Jef refuses (for
   example uncommitted changes, or something that looks like a secret), send
   the reason to the implementer with `jef agent send`. Once the PR is open,
-  start the next task that doesn't need this one's code, in the same turn
-  (`jef task start N`). A task that needs it still waits for the merge.
+  start the next task in the same turn: `jef task start N` if it doesn't
+  need this one's code, or `jef task start N --on 1` if it does.
 - `STATUS: stuck …`: answer it yourself if you can, with `jef agent send`. If it needs
   the person, ask them and run `jef wait "…"`.
 
@@ -155,10 +166,15 @@ Each heartbeat, go through this:
      When it's ready, `jef task publish N --note "Rebased on main to fix merge conflicts."`
      If the two changes really disagree, explain the choice to the person
      and `jef wait`.
+   - **A stacked task's base changed**: if task M was updated (you
+     published it again) while task N is built on it (`Stacked: N on M` in
+     `jef overview`), send N's implementer:
+     `jef agent send impl-N "Task M's branch changed. Rebase: git fetch origin, then git rebase origin/jef/<project>/task-M (or origin/main if M has merged), fix any conflicts, run the tests, then report STATUS: ready."`
+     If N's PR is open, then `jef task publish N --note "Rebased on task M's latest changes."`
    - **Closed without merging**: ask the person what they want.
    - **Waiting for review**: nothing to do for that PR; the person merges.
-     If a task that doesn't need its code hasn't started and there's room
-     under the limit, start it.
+     If a task hasn't started and there's room under the limit, start it
+     (with `--on` if it needs that PR's code).
 4. **Everything merged**: `jef prs check` says the project is done. Tell the
    person; Jef stops you after that turn.
 
