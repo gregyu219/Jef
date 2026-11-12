@@ -1,3 +1,4 @@
+from pathlib import Path
 import json
 
 import pytest
@@ -196,3 +197,19 @@ def test_pushing_is_refused_even_with_git_options_first():
 
     for rule in ("Bash(git push*)", "Bash(git -C * push*)", "Bash(git -c * push*)"):
         assert rule in ALWAYS_DENIED
+
+
+def test_only_implementers_can_change_files():
+    from jef.chats import EDIT_TOOLS, Agent, Chats, Role
+    from jef.workspace import Workspace
+
+    chats = Chats(Workspace(Path("/tmp/jef-test-unused")), "/bin/claude")
+    for role in Role:
+        cmd = chats.command(Agent("a", role, "s", "/tmp"), "p", first_turn=True)
+        mode = cmd[cmd.index("--permission-mode") + 1]
+        denied = cmd[cmd.index("--disallowedTools") + 1 :]
+        if role is Role.IMPLEMENTER:
+            assert mode == "acceptEdits" and not set(EDIT_TOOLS) & set(denied)
+        else:
+            # acceptEdits would approve edits whatever the allowed list says.
+            assert mode == "default" and set(EDIT_TOOLS) <= set(denied), role
