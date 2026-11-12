@@ -7,7 +7,8 @@ from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Chats, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus
-from jef.pipeline import Phase, Pipeline, PipelineError, parse_status, parse_tasks
+from jef.pipeline import Phase, Pipeline, PipelineError, parse_pr, parse_status, parse_tasks
+from jef.publish import PublishError
 from jef.projects import goal_fields, slugify, start_project
 from jef.tasks import TaskStatus
 from jef.web.app import create_app
@@ -41,6 +42,24 @@ class FakeGit:
         path.mkdir(parents=True)
 
 
+class FakePublisher:
+    def __init__(self):
+        self.calls = []
+        self.fail = None
+        self.next_pr = 20
+
+    def publish(self, work, branch, base, title, body):
+        self.calls.append((branch, base, title, body))
+        if self.fail:
+            raise PublishError(self.fail)
+        url = f"https://github.com/gregyu219/Jef/pull/{self.next_pr}"
+        self.next_pr += 1
+        return url
+
+
+READY = "Done.\n```pr\nTitle: Show the version\n\n## What this does\nShows it.\n```\nSTATUS: ready"
+
+
 class World:
     def __init__(self, tmp_path):
         self.ws = Workspace(tmp_path / "jef")
@@ -52,7 +71,8 @@ class World:
         self.clock = 1_000_000.0
         self.chats = Chats(self.ws, "/bin/claude", popen=self.popen)
         self.git = FakeGit()
-        self.pipeline = Pipeline(self.ws, self.chats, git=self.git, pr_state=lambda url: self.pr_states.get(url, "OPEN"), now=lambda: self.clock)
+        self.publisher = FakePublisher()
+        self.pipeline = Pipeline(self.ws, self.chats, git=self.git, publisher=self.publisher, pr_state=lambda url: self.pr_states.get(url, "OPEN"), now=lambda: self.clock)
         project = start_project(self.ws, 1, "gregyu219/Jef", self.chats, clone=lambda repo, dest: dest.mkdir(parents=True), choose_name=lambda names: sorted(names)[0])
         self.slug = project.slug
 
@@ -87,6 +107,9 @@ def test_parsers():
     assert parse_tasks("no block") == []
     assert parse_status("Done.\nSTATUS: pr-opened https://github.com/a/b/pull/3") == ("pr-opened", "https://github.com/a/b/pull/3")
     assert parse_status("hmm") is None
+    assert parse_status("x\nSTATUS: ready") == ("ready", "")
+    assert parse_pr("```pr\nTitle: T\n\nBody here\n```") == ("T", "Body here")
+    assert parse_pr("no block") is None
 
 
 def test_project_names_are_short_whole_words():
@@ -130,7 +153,7 @@ def test_from_go_to_done(w):
     assert tasks[1].status is TaskStatus.NOT_STARTED
     impl = w.agent("impl-1")
     assert impl.folder.endswith("work/impl-1") and impl.parent == "ada"
-    assert "gh pr create --base main" in w.last_message("impl-1")
+    assert "STATUS: ready" in w.last_message("impl-1") and "Don't push" in w.last_message("impl-1")
 
     # Still working: the heartbeat nudges it once the interval has passed.
     w.reply("impl-1", "Edited the template.\nSTATUS: working tests next")
@@ -143,10 +166,13 @@ def test_from_go_to_done(w):
     p.tick(slug)
     assert "Heartbeat check-in" in w.last_message("impl-1")
 
-    # PR opened, then merged on GitHub: task 2 starts.
+    # Ready: Jef pushes the branch and opens the PR itself. Then it's merged: task 2 starts.
     url = "https://github.com/gregyu219/Jef/pull/20"
-    w.reply("impl-1", f"Opened it.\nSTATUS: pr-opened {url}")
+    w.reply("impl-1", READY)
+    assert w.publisher.calls[0][:3] == (f"jef/{slug}/task-1", "main", "Show the version")
+    assert "## What this does" in w.publisher.calls[0][3]
     assert p.tasks(slug).tasks[0].status is TaskStatus.PENDING_REVIEW
+    assert p.tasks(slug).tasks[0].pr == url
     assert "impl-2" not in w.procs  # one at a time
     w.pr_states[url] = "MERGED"
     w.clock += 301
@@ -158,7 +184,7 @@ def test_from_go_to_done(w):
 
     # Last PR merged: the project and its backlog item are done, agents stopped.
     url2 = "https://github.com/gregyu219/Jef/pull/21"
-    w.reply("impl-2", f"STATUS: pr-opened {url2}")
+    w.reply("impl-2", READY)
     w.pr_states[url2] = "MERGED"
     w.clock += 301
     p.tick(slug)
@@ -267,3 +293,42 @@ def test_web_buttons(w):
     c.post(f"/projects/{w.slug}/heartbeat", data={"minutes": "30"})
     assert w.pipeline.heartbeat_minutes(w.slug) == 30
     assert "between 5 minutes" in c.post(f"/projects/{w.slug}/heartbeat", data={"minutes": "2"}).text
+
+
+def approved_with_one_task(w):
+    w.pipeline.start_research(w.slug)
+    w.reply("ada", "hi")
+    w.reply("research", "findings")
+    w.reply("ada", "```tasks\n1. A\n```")
+    w.pipeline.approve_tasks(w.slug)
+
+
+def test_publish_problems_go_back_to_the_agent_a_few_times(w):
+    approved_with_one_task(w)
+    w.publisher.fail = "There are uncommitted changes."
+    w.reply("impl-1", READY)
+    assert "Jef couldn't open your PR yet: There are uncommitted changes." in w.last_message("impl-1")
+    assert w.agent("impl-1").note.startswith("Couldn't open the PR (1)")
+    w.reply("impl-1", READY)
+    w.reply("impl-1", READY)
+    turns = len(w.procs["impl-1"])
+    w.reply("impl-1", READY)  # fourth failure: stop sending it back
+    assert len(w.procs["impl-1"]) == turns
+    assert w.agent("impl-1").note.startswith("Stuck: Jef couldn't open the PR")
+    assert w.pipeline.tasks(w.slug).tasks[0].status is TaskStatus.IMPLEMENTATION
+
+
+def test_ready_without_a_pr_block_is_sent_back(w):
+    approved_with_one_task(w)
+    w.reply("impl-1", "All done.\nSTATUS: ready")
+    assert w.publisher.calls == []
+    assert "no ```pr block" in w.last_message("impl-1")
+
+
+def test_ready_again_updates_the_open_pr(w):
+    approved_with_one_task(w)
+    w.reply("impl-1", READY)
+    w.chats.send(w.slug, "impl-1", "Please rename the variable")
+    w.reply("impl-1", "Renamed.\nSTATUS: ready")  # no block needed the second time
+    assert len(w.publisher.calls) == 2
+    assert w.agent("impl-1").note == "PR updated, waiting for your review"

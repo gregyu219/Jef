@@ -44,6 +44,9 @@ NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 # rules in Claude Code. These back up Jef's ground rules; branch protection on
 # GitHub is still the real guard against pushes to main.
 ALWAYS_DENIED = [
+    # Jef pushes and opens PRs itself, after its secret check.
+    "Bash(git push*)",
+    "Bash(gh pr create*)",
     "Bash(gh pr merge *)",
     "Bash(gh api *merge*)",
     "Bash(git push * main)",
@@ -77,14 +80,24 @@ POLICIES: dict[Role, RolePolicy] = {
         READ_ONLY
         + [
             "Bash(git *)",
-            "Bash(gh pr create *)",
             "Bash(gh pr view *)",
             "Bash(gh pr list *)",
+            # Setting up and testing the project.
             "Bash(python *)",
             "Bash(python3 *)",
+            "Bash(pip *)",
+            "Bash(pip3 *)",
+            "Bash(uv *)",
             "Bash(pytest *)",
             "Bash(.venv/bin/*)",
             "Bash(npm *)",
+            "Bash(npx *)",
+            "Bash(pnpm *)",
+            "Bash(yarn *)",
+            "Bash(make *)",
+            "Bash(cargo *)",
+            "Bash(go *)",
+            "Bash(test *)",
             "Bash(ls *)",
             "Bash(mkdir *)",
         ]
