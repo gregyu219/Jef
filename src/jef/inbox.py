@@ -5,7 +5,8 @@ A coordinator runs its project with its own ``jef`` commands, like
 drop a request in the project folder, and the running Jef carries it out
 within a few seconds and writes back the answer. That way Jef is the only
 thing that ever writes the project's files, starts agents or pushes code, so
-its rules (one task at a time, the secret check, never pushing ``main``) hold
+its rules (no more tasks at once than the project allows, the secret check,
+never pushing ``main``) hold
 whatever a coordinator asks.
 
     projects/<slug>/requests/<id>.json         waiting for Jef
