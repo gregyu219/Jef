@@ -9,7 +9,7 @@ from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Chats, ChatError, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus
-from jef import coordinate, inbox
+from jef import coordinate, inbox, models
 from jef.pipeline import Heartbeat, Phase, Pipeline, PipelineError, last_reply, parse_pr, pr_label
 from jef.publish import PublishError
 from jef.projects import goal_fields, slugify, start_project
@@ -480,6 +480,19 @@ def test_heartbeat_interval_is_per_project(w):
         w.pipeline.set_heartbeat_minutes(w.slug, 1)
 
 
+def test_models_are_per_project(w):
+    p = w.pipeline
+    assert p.models(w.slug) == {Role.COORDINATOR: "sonnet", Role.RESEARCH: "opus", Role.IMPLEMENTER: "opus"}
+    p.set_models(w.slug, {Role.COORDINATOR: "Haiku", Role.IMPLEMENTER: "default"})
+    assert p.models(w.slug) == {Role.COORDINATOR: "haiku", Role.RESEARCH: "opus", Role.IMPLEMENTER: "default"}
+    assert goal_fields(w.ws, w.slug)["coordinator model"] == "haiku"
+    with pytest.raises(PipelineError):
+        p.set_models(w.slug, {Role.RESEARCH: "sonnet", Role.COORDINATOR: "gpt-9"})
+    assert p.models(w.slug)[Role.RESEARCH] == "opus"  # nothing saved
+    with pytest.raises(PipelineError):
+        p.set_models(w.slug, {Role.JEF: "opus"})
+
+
 def test_coordinators_get_jef_commands_and_nobody_else_does(w):
     ada = w.procs["ada"][0]
     assert ada.kwargs["env"]["JEF_PROJECT"] == w.slug and ada.kwargs["env"]["JEF_AGENT"] == "ada"
@@ -637,6 +650,22 @@ def test_web_budget_form(w):
     assert "budget is used up" in page and "Budget reached" in page
     c.post(f"/projects/{w.slug}/budget", data={"amount": ""})
     assert w.pipeline.budget_usd(w.slug) is None
+
+
+def test_web_models_form(w):
+    c = client(w)
+    w.chats.model_for = lambda slug, role: models.model_for(w.ws, slug, role)
+    page = c.get(f"/projects/{w.slug}").text
+    assert 'action="/projects/{}/models"'.format(w.slug) in page
+    assert '<option value="sonnet" selected>' in page
+    c.post(f"/projects/{w.slug}/models", data={"coordinator": "haiku", "research": "fable", "implementer": "opus"})
+    assert w.pipeline.models(w.slug) == {Role.COORDINATOR: "haiku", Role.RESEARCH: "fable", Role.IMPLEMENTER: "opus"}
+    assert '<option value="haiku" selected>' in c.get(f"/projects/{w.slug}").text
+    assert "Pick one of" in c.post(f"/projects/{w.slug}/models", data={"coordinator": "gpt-9"}).text
+    # The coordinator's next turn runs on the new model.
+    w.reply("ada", "hi")
+    c.post(f"/projects/{w.slug}/message", data={"message": "hello"})
+    assert flag(w.procs["ada"][-1].cmd, "--model") == "haiku"
 
 
 def test_ago():

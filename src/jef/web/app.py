@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 from jef import claude, jefchat, models
 from jef.backlog import Backlog, BacklogStatus
-from jef.chats import Agent, Chats, ChatError, Status, load_roster
+from jef.chats import Agent, Chats, ChatError, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
 from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError, pr_label
@@ -49,6 +49,13 @@ TEMPLATES.env.filters["tokens"] = format_tokens
 TEMPLATES.env.filters["cost"] = format_cost
 TEMPLATES.env.filters["reset"] = format_reset
 TEMPLATES.env.filters["pr_label"] = pr_label
+
+# The project page's model form: each level's field name and label.
+MODEL_FORM: dict[Role, tuple[str, str]] = {
+    Role.COORDINATOR: ("coordinator", "Coordinator"),
+    Role.RESEARCH: ("research", "Research"),
+    Role.IMPLEMENTER: ("implementer", "Implementers"),
+}
 
 
 @dataclass
@@ -386,6 +393,10 @@ def create_app(
                 "status_text": status_path(ws, slug).read_text(encoding="utf-8") if status_path(ws, slug).exists() else "",
                 "heartbeat": flow.heartbeat_minutes(slug) if flow else 60,
                 "coordinator_decides": flow.coordinator_decides(slug) if flow else True,
+                "models": [
+                    (name, label, models.model_setting(ws, slug, role)) for role, (name, label) in MODEL_FORM.items()
+                ],
+                "model_choices": models.CHOICES,
                 "last_checked": ago(flow.now() - checked) if checked is not None else "",
                 "at_once": IMPLEMENTERS_AT_ONCE,
                 "usage": usage,
@@ -431,6 +442,12 @@ def create_app(
         if not minutes.strip().isdigit():
             return RedirectResponse(f"/projects/{slug}?error=Type+a+number+of+minutes.", status_code=303)
         return pipeline_action(slug, lambda flow: flow.set_heartbeat_minutes(slug, int(minutes)))
+
+    @app.post("/projects/{slug}/models")
+    def set_models(slug: str, coordinator: str = Form(""), research: str = Form(""), implementer: str = Form("")):
+        given = {"coordinator": coordinator, "research": research, "implementer": implementer}
+        chosen = {role: given[name] for role, (name, _) in MODEL_FORM.items() if given[name].strip()}
+        return pipeline_action(slug, lambda flow: flow.set_models(slug, chosen))
 
     @app.post("/projects/{slug}/coordinator-decides")
     def set_coordinator_decides(slug: str, on: str = Form("")):
