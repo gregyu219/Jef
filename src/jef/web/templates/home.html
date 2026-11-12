@@ -8,7 +8,7 @@
     <p class="hint">Everything you've asked for. Nothing starts until you press Start and confirm.</p>
     {% if backlog %}
     <table>
-      <thead><tr><th>#</th><th>Feature</th><th>Status</th><th>Coordinator</th></tr></thead>
+      <thead><tr><th>#</th><th>Feature</th><th>Status</th><th>Coordinator</th><th></th></tr></thead>
       <tbody>
       {% for item in backlog %}
         <tr>
@@ -19,6 +19,14 @@
             {% if item.status == waiting %}<a class="start" href="/backlog/{{ item.number }}/start">Start…</a>
             {% elif item.coordinator in coordinator_pages %}<a href="/projects/{{ coordinator_pages[item.coordinator] }}">{{ item.coordinator }}</a>
             {% else %}{{ item.coordinator or "—" }}{% endif %}
+          </td>
+          <td>
+            {% if item.status == waiting %}
+            <form method="post" action="/backlog/{{ item.number }}/delete" class="inline"
+                  onsubmit='return confirm({{ ("Delete “" ~ item.feature ~ "” from the backlog?") | tojson }})'>
+              <button type="submit" class="secondary small" aria-label="Delete backlog item {{ item.number }}">Delete</button>
+            </form>
+            {% endif %}
           </td>
         </tr>
       {% endfor %}
@@ -32,6 +40,7 @@
       <button type="submit">Add to backlog</button>
     </form>
     {% if error == "empty" %}<p class="error">Type a description first.</p>{% endif %}
+    {% if error == "delete" %}<p class="error">That item can't be deleted. Only items that haven't started can be.</p>{% endif %}
   </section>
 
   <section>

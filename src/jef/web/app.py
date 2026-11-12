@@ -141,6 +141,16 @@ def create_app(
     def find_item(number: int):
         return next((i for i in Backlog.load(ws.backlog_file).items if i.number == number), None)
 
+    @app.post("/backlog/{number}/delete")
+    def delete_backlog_item(number: int):
+        backlog = Backlog.load(ws.backlog_file)
+        try:
+            backlog.remove(number)
+        except ValueError:
+            return RedirectResponse("/?error=delete", status_code=303)
+        backlog.save(ws.backlog_file)
+        return RedirectResponse("/", status_code=303)
+
     @app.get("/backlog/{number}/start", response_class=HTMLResponse)
     def start_form(request: Request, number: int, error: str = "", repo: str = ""):
         item = find_item(number)

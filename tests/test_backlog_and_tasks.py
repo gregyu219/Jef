@@ -41,6 +41,26 @@ def test_backlog_round_trip_is_unchanged(tmp_path):
     assert Backlog.load(path).render() == BACKLOG
 
 
+def test_removing_a_waiting_item_leaves_the_rest_unchanged(tmp_path):
+    path = tmp_path / "backlog.md"
+    path.write_text(BACKLOG)
+    backlog = Backlog.load(path)
+    removed = backlog.remove(2)
+    assert removed.feature == "Dark mode for the to-do app"
+    backlog.save(path)
+    assert path.read_text() == BACKLOG.replace("| 2 | Dark mode for the to-do app | Waiting | |\n", "")
+
+
+@pytest.mark.parametrize("number", [1, 99])
+def test_started_or_missing_items_cannot_be_removed(tmp_path, number):
+    path = tmp_path / "backlog.md"
+    path.write_text(BACKLOG)
+    backlog = Backlog.load(path)
+    with pytest.raises(ValueError):
+        backlog.remove(number)
+    assert backlog.render() == BACKLOG
+
+
 def test_new_backlog_items_start_waiting_with_the_next_number(tmp_path):
     path = tmp_path / "backlog.md"
     path.write_text(BACKLOG)

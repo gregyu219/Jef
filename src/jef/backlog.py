@@ -77,6 +77,17 @@ class Backlog:
         self.items.append(item)
         return item
 
+    def remove(self, number: int) -> BacklogItem:
+        """Remove a Waiting item. Started or finished items have a project
+        pointing at their number, so they can't be removed."""
+        item = next((i for i in self.items if i.number == number), None)
+        if item is None:
+            raise ValueError(f"There is no backlog item #{number}.")
+        if item.status != BacklogStatus.WAITING:
+            raise ValueError(f"Backlog item #{number} has started, so it can't be deleted.")
+        self.items.remove(item)
+        return item
+
     def render(self) -> str:
         self._doc.headers = list(HEADERS)
         self._doc.rows = [
