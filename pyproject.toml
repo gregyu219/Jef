@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jef"
+version = "0.1.0"
+description = "A user-friendly software factory: tell Jef what you want, agents build it, you merge the PRs."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+jef = "jef.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jef"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
