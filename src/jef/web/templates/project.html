@@ -69,15 +69,25 @@
     <h2>Agents</h2>
     {% if agents %}
     <table>
-      <thead><tr><th>Name</th><th>Role</th><th>Spawned by</th><th>Status</th><th>Latest</th></tr></thead>
+      <thead><tr><th>Name</th><th>Role</th><th>Spawned by</th><th>Status</th><th>Tokens</th><th>Est. cost</th><th>Latest</th></tr></thead>
       <tbody>
       {% for a in agents %}
-        <tr><td><a href="/projects/{{ project.slug }}/agents/{{ a.name }}">{{ a.name }}</a></td><td>{{ a.role.value }}</td><td>{{ a.parent or "you" }}</td><td>{{ a.status.value }}</td><td>{{ a.note }}</td></tr>
+        {% set used = usage.get(a.name, no_usage) %}
+        <tr><td><a href="/projects/{{ project.slug }}/agents/{{ a.name }}">{{ a.name }}</a></td><td>{{ a.role.value }}</td><td>{{ a.parent or "you" }}</td><td>{{ a.status.value }}</td><td class="num">{{ used.total_tokens | tokens }}</td><td class="num">{{ used.cost_usd | cost }}</td><td>{{ a.note }}</td></tr>
       {% endfor %}
       </tbody>
     </table>
     {% else %}
     <p class="empty">No agents yet.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Usage</h2>
+    <p class="hint">Added up from every finished agent turn. Costs are Claude Code's estimates at API list prices, not necessarily what you're billed (for example on a Claude subscription).</p>
+    <p class="usage">{{ usage_total.total_tokens | tokens }} tokens · {{ usage_total.cost_usd | cost }} estimated · {{ usage_total.turns }} turn{{ "" if usage_total.turns == 1 else "s" }}</p>
+    {% if usage_total.turns %}
+    <p class="hint">{{ usage_total.input_tokens | tokens }} input, {{ usage_total.output_tokens | tokens }} output, {{ usage_total.cache_read_tokens | tokens }} cache reads, {{ usage_total.cache_write_tokens | tokens }} cache writes.</p>
     {% endif %}
   </section>
 
