@@ -3,8 +3,10 @@
 Agents only commit. When an implementer reports ``STATUS: ready``, Jef:
 
 1. checks it's on its own ``jef/...`` branch with nothing left uncommitted,
-2. scans every added line and the PR text for anything that looks like a
-   secret, and refuses to push if it finds one,
+2. scans every line added in every commit on the branch (not just the
+   final result, since the push sends all of them), the commit messages and
+   the PR text for anything that looks like a secret, and refuses to push if
+   it finds one,
 3. pushes the branch (never ``main``: the target is always the agent's own
    ``jef/...`` branch), and
 4. opens the PR with your GitHub login, or updates the one already open.
@@ -72,9 +74,15 @@ class Publisher:
         if self._cmd(work, "git", "rev-list", "--count", f"origin/{base}..HEAD") in ("", "0"):
             raise PublishError(f"There are no commits on `{branch}` yet. Commit your work, then report ready again.")
 
-        diff = self._cmd(work, "git", "diff", f"origin/{base}...HEAD")
+        # Every commit's own changes: a secret added in one commit and deleted
+        # in a later one is still in the history the push sends to GitHub.
+        history = self._cmd(work, "git", "log", "-p", "--format=", "--no-color", f"origin/{base}..HEAD")
+        # And the final result, which also covers changes made while merging.
+        diff = self._cmd(work, "git", "diff", "--no-color", f"origin/{base}...HEAD")
         messages = self._cmd(work, "git", "log", "--format=%B", f"origin/{base}..HEAD")
-        problems = [f"a {kind} in {path}" for kind, path in find_secrets_in_diff(diff)]
+        found = find_secrets_in_diff(history)
+        found += [hit for hit in find_secrets_in_diff(diff) if hit not in found]
+        problems = [f"a {kind} in {path}" for kind, path in found]
         problems += [f"a {kind} in a commit message" for kind in find_secrets_in_text(messages)]
         problems += [f"a {kind} in the PR text" for kind in find_secrets_in_text(title + "\n" + body)]
         if problems:

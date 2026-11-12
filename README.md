@@ -224,7 +224,7 @@ Every agent is a named Claude Code session with its own conversation:
 - **Messaging** it later (a heartbeat nudge, a small fix) continues the same session, so it remembers everything so far.
 - **Stopping** an agent also stops every agent it spawned, so stopping a coordinator stops its workers.
 
-Nobody is around to answer permission prompts, so each role gets a fixed list of what it may do, and anything else is refused. **No agent can push, open a PR or merge**, whatever its role: implementers only commit, coordinators ask Jef, and Jef's own code does the rest.
+Nobody is around to answer permission prompts, so each role gets a fixed list of what it may do, and anything else is refused. Only implementers can change files. Coordinators, research agents and the home-page Jef chat are refused file edits outright, so they can't, for example, rewrite a project's `goal.md`. **No agent can push, open a PR or merge**, whatever its role: implementers only commit, coordinators ask Jef, and Jef's own code does the rest.
 
 ### Chat with Jef
 
@@ -235,7 +235,7 @@ The home page has its own chat with Jef. Ask it how projects are going, or talk 
 When an implementer reports `STATUS: ready`, Jef:
 
 1. checks it's on its own `jef/...` branch, with everything committed,
-2. runs the **secret check**: it scans every line the agent added, its commit messages and the PR text for things shaped like secrets (Anthropic API keys, GitHub tokens, private keys). If it finds one, it doesn't push, and it tells the agent which file to fix. It never repeats the secret itself,
+2. runs the **secret check**: it scans every line added in every commit on the branch (so a secret that a later commit deleted is still caught, since the push sends the whole history), the commit messages and the PR text for things shaped like secrets (Anthropic API keys, GitHub tokens, private keys). If it finds one, it doesn't push, and it tells the agent which file to fix. It never repeats the secret itself,
 3. pushes the branch, only ever the agent's own `jef/...` branch, never `main`, and
 4. opens the PR with your GitHub login, or updates the PR that's already open.
 

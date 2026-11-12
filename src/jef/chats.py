@@ -89,6 +89,14 @@ class RolePolicy:
     allowed_tools: list[str]
     model: str = ""  # empty: Claude Code's default
     denied: tuple[str, ...] = ()  # refused for this role, on top of ALWAYS_DENIED
+    # Only implementers change files. Claude Code's acceptEdits mode approves
+    # any edit in the working folder, whatever allowed_tools says, so the
+    # other roles run in the default mode and are refused file edits outright.
+    can_edit: bool = False
+
+
+# File-changing tools, refused for every role that isn't meant to change files.
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
 
 # Only coordinators may run Jef's own commands; everyone else is refused them,
@@ -153,6 +161,7 @@ POLICIES: dict[Role, RolePolicy] = {
             "Bash(mkdir *)",
         ],
         denied=NO_JEF_COMMANDS,
+        can_edit=True,
     ),
 }
 
@@ -301,9 +310,11 @@ class Chats:
             cmd += ["--session-id", agent.session, "--name", f"jef · {project} · {agent.name}"]
         else:
             cmd += ["--resume", agent.session]
-        cmd += ["--permission-mode", "acceptEdits", "--permission-prompts", "none"]
+        mode = "acceptEdits" if policy.can_edit else "default"
+        cmd += ["--permission-mode", mode, "--permission-prompts", "none"]
         cmd += ["--allowedTools", *policy.allowed_tools]
-        cmd += ["--disallowedTools", *ALWAYS_DENIED, *policy.denied]
+        denied = [*ALWAYS_DENIED, *policy.denied, *(() if policy.can_edit else EDIT_TOOLS)]
+        cmd += ["--disallowedTools", *denied]
         model = self.model_for(project, agent.role) or policy.model
         if model:
             cmd += ["--model", model]

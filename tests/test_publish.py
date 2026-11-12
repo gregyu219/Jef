@@ -127,3 +127,17 @@ def test_refuses_uncommitted_work_no_commits_and_wrong_branches(setup):
 def test_secret_scan_only_looks_at_added_lines():
     diff = f"+++ b/a.py\n-old = '{FAKE_KEY}'\n+new = 1\n+++ b/b.py\n+k = '{FAKE_KEY}'\n"
     assert find_secrets_in_diff(diff) == [("Anthropic API key", "b.py")]
+
+
+def test_refuses_a_secret_that_a_later_commit_deleted(setup):
+    work, origin, publisher, gh_calls = setup
+    commit(work, ".env", f"KEY={FAKE_KEY}\n")
+    git(work, "rm", "-q", ".env")
+    git(work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "remove .env")
+    commit(work, "hello.txt", "hi\n")  # the branch's final diff is clean
+    with pytest.raises(PublishError) as err:
+        publisher.publish(work, "jef/demo/task-1", "main", "t", "b")
+    assert "Anthropic API key in .env" in str(err.value)
+    assert FAKE_KEY not in str(err.value)
+    branches = subprocess.run(["git", "branch"], cwd=origin, capture_output=True, text=True).stdout
+    assert "jef/demo/task-1" not in branches and gh_calls == []
