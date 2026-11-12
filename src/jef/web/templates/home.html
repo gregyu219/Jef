@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jef</title>
+  <style>
+    :root {
+      --bg: #fafaf9; --panel: #ffffff; --text: #1c1917; --muted: #78716c;
+      --border: #e7e5e4; --accent: #2563eb; --accent-text: #ffffff;
+      --waiting: #a8a29e; --progress: #2563eb; --done: #16a34a;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1917; --panel: #292524; --text: #f5f5f4; --muted: #a8a29e;
+        --border: #44403c; --accent: #60a5fa; --accent-text: #1c1917;
+        --waiting: #78716c; --progress: #60a5fa; --done: #4ade80;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.5 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 880px; margin: 0 auto; padding: 32px 16px 64px; }
+    header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 32px; }
+    header h1 { margin: 0; font-size: 28px; }
+    header p { margin: 0; color: var(--muted); }
+    section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+    h2 { margin: 0 0 4px; font-size: 18px; }
+    .hint { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px 6px; border-top: 1px solid var(--border); vertical-align: top; }
+    th { font-size: 13px; color: var(--muted); font-weight: 600; border-top: none; }
+    td.num { color: var(--muted); width: 2.5em; }
+    .pill { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 13px; border: 1px solid currentColor; }
+    .pill.waiting { color: var(--waiting); }
+    .pill.in-progress { color: var(--progress); }
+    .pill.done { color: var(--done); }
+    form { display: flex; gap: 8px; margin-top: 16px; }
+    input[type=text] { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+    button { padding: 8px 16px; border: none; border-radius: 8px; background: var(--accent); color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer; }
+    .error { color: #dc2626; font-size: 14px; margin: 8px 0 0; }
+    .empty { color: var(--muted); margin: 0; }
+    .bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--border); margin-top: 6px; min-width: 120px; }
+    .bar span { display: block; height: 100%; }
+    .s0 { background: var(--waiting); } .s1 { background: #a855f7; } .s2 { background: var(--progress); }
+    .s3 { background: #f59e0b; } .s4 { background: var(--done); }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 13px; color: var(--muted); margin-top: 12px; }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+    footer { color: var(--muted); font-size: 13px; }
+    code { font-size: 13px; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Jef</h1>
+    <p>Tell Jef what you want built.</p>
+  </header>
+
+  <section>
+    <h2>Backlog</h2>
+    <p class="hint">Everything you've asked for. Nothing starts until you confirm.</p>
+    {% if backlog %}
+    <table>
+      <thead><tr><th>#</th><th>Feature</th><th>Status</th><th>Coordinator</th></tr></thead>
+      <tbody>
+      {% for item in backlog %}
+        <tr>
+          <td class="num">{{ item.number }}</td>
+          <td>{{ item.feature }}</td>
+          <td><span class="pill {{ item.status.value | lower | replace(' ', '-') }}">{{ item.status.value }}</span></td>
+          <td>{{ item.coordinator or "—" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">Your backlog is empty. Add the first thing you want built.</p>
+    {% endif %}
+    <form method="post" action="/backlog">
+      <input type="text" name="feature" placeholder="Describe a feature in plain words" aria-label="New backlog item" autocomplete="off">
+      <button type="submit">Add to backlog</button>
+    </form>
+    {% if error == "empty" %}<p class="error">Type a description first.</p>{% endif %}
+  </section>
+
+  <section>
+    <h2>Projects</h2>
+    <p class="hint">How every started project is going.</p>
+    {% if projects %}
+    <table>
+      <thead><tr><th>Project</th><th>Tasks merged</th><th>Progress</th></tr></thead>
+      <tbody>
+      {% for p in projects %}
+        <tr>
+          <td>{{ p.name }}</td>
+          <td>{{ p.merged }} of {{ p.total }}</td>
+          <td>
+            <div class="bar" role="img" aria-label="{% for s in statuses %}{{ p.counts[s] }} {{ s.value }}{% if not loop.last %}, {% endif %}{% endfor %}">
+              {% for s in statuses %}{% if p.counts[s] %}<span class="s{{ loop.index0 }}" style="width: {{ 100 * p.counts[s] / p.total }}%"></span>{% endif %}{% endfor %}
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div class="legend">
+      {% for s in statuses %}<span><i class="s{{ loop.index0 }}"></i>{{ s.value }}</span>{% endfor %}
+    </div>
+    {% else %}
+    <p class="empty">No projects yet. Projects appear here once you start a backlog item.</p>
+    {% endif %}
+  </section>
+
+  <footer>Workspace: <code>{{ workspace }}</code></footer>
+</main>
+</body>
+</html>
