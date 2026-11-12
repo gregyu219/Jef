@@ -5,7 +5,9 @@
     jef status   is Jef running, and where?
     jef attach   watch the background session (Ctrl+B then D to leave it)
     jef stop     stop the background session
-    jef project  (for coordinators) run a project; see jef.coordinate
+
+Coordinators also get commands to run their project (``jef overview``,
+``jef task start 1`` and so on); see ``jef.coordinate``.
 
 Plain ``jef`` is the same as ``jef run``.
 """
@@ -223,8 +225,9 @@ def main(argv: list[str] | None = None, tmux: Tmux | None = None) -> int:
         "status": lambda: cmd_status(args, tmux),
         "attach": lambda: cmd_attach(args, tmux),
         "stop": lambda: cmd_stop(args, tmux),
-        "project": lambda: cmd_project(args),
     }
+    if getattr(args, "coordinator", False):
+        return cmd_project(args)
     return handlers[args.command]()
 
 

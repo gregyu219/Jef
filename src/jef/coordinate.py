@@ -1,22 +1,22 @@
-"""``jef project …``: the commands a coordinator runs its project with.
+"""The commands a coordinator runs its project with.
 
 Only a coordinator's turn can use them: Jef sets ``JEF_PROJECT`` and
 ``JEF_AGENT`` for coordinators and nobody else, and only coordinators are
-allowed to run ``jef``. Reading (``status``, ``read``) happens right here.
-Anything that changes the project goes to Jef's inbox, and the running Jef
-carries it out and answers within a few seconds, so its rules always apply.
+allowed to run them. Reading (``overview``, ``agent read``) happens right
+here. Anything that changes the project goes to Jef's inbox, and the running
+Jef carries it out and answers within a few seconds, so its rules always apply.
 
-    jef project status                 the project at a glance
-    jef project read impl-2            an agent's latest reply
-    jef project research ["brief"]     start the research agent
-    jef project plan "Task" "Task" …   set the task list
-    jef project approve                approve the list (after it waited a heartbeat)
-    jef project start 2                start task 2's implementer
-    jef project send impl-2 "…"        message one of your agents
-    jef project publish 2 [--note …]   push task 2's branch and open or update its PR
-    jef project prs                    ask GitHub about every PR (merged? conflicts?)
-    jef project wait "reason"          show the person you're waiting for them
-    jef project stop impl-2            stop one of your agents
+    jef overview                      the project at a glance
+    jef research start ["brief"]      start the research agent
+    jef tasks set "Task" "Task" …     set the task list
+    jef tasks approve                 approve the list (after it waited a heartbeat)
+    jef task start 1                  start task 1's implementer (it's named impl-1)
+    jef task publish 1 [--note …]     push task 1's branch and open or update its PR
+    jef prs check                     ask GitHub about every PR (merged? conflicts?)
+    jef agent read impl-1             an agent's latest reply
+    jef agent send impl-1 "…"         message one of your agents
+    jef agent stop impl-1             stop one of your agents
+    jef wait "reason"                 show the person you're waiting for them
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from jef.workspace import Workspace
 ANSWER_SECONDS = 100  # under the two minutes Claude Code gives a command
 
 NOT_A_COORDINATOR = (
-    "`jef project` is for Jef's coordinators: it only works inside a coordinator's turn, "
+    "This command is for Jef's coordinators: it only works inside a coordinator's turn, "
     "where Jef has set JEF_PROJECT and JEF_AGENT."
 )
 JEF_NOT_RUNNING = (
@@ -42,49 +42,68 @@ JEF_NOT_RUNNING = (
 )
 
 
+# The top-level words these commands start with, for the CLI and for the
+# coordinator's allowed tools.
+COMMAND_WORDS = ("overview", "research", "tasks", "task", "prs", "agent", "wait")
+
+
 def add_parser(sub: argparse._SubParsersAction) -> None:
-    project = sub.add_parser("project", help="(for coordinators) run a project")
-    cmds = project.add_subparsers(dest="action", metavar="action", required=True)
-    cmds.add_parser("status", help="the project at a glance")
-    read = cmds.add_parser("read", help="an agent's latest reply")
-    read.add_argument("agent")
-    research = cmds.add_parser("research", help="start the research agent")
-    research.add_argument("brief", nargs="*", help="what to look into (optional)")
-    plan = cmds.add_parser("plan", help="set the task list, one quoted title per task")
-    plan.add_argument("titles", nargs="*")
-    cmds.add_parser("approve", help="approve the task list")
-    start = cmds.add_parser("start", help="start a task's implementer")
-    start.add_argument("number")
-    send = cmds.add_parser("send", help="message one of your agents")
-    send.add_argument("agent")
-    send.add_argument("message", nargs="+")
-    stop = cmds.add_parser("stop", help="stop one of your agents")
-    stop.add_argument("agent")
-    wait = cmds.add_parser("wait", help="show the person you're waiting for them")
-    wait.add_argument("reason", nargs="+")
-    publish = cmds.add_parser("publish", help="push a task's branch and open or update its PR")
+    """Add the coordinator's commands to the ``jef`` command."""
+
+    def group(name: str, help: str) -> argparse._SubParsersAction:
+        parser = sub.add_parser(name, help=f"(for coordinators) {help}")
+        parser.set_defaults(coordinator=True)
+        return parser.add_subparsers(dest="action", metavar="action", required=True)
+
+    overview = sub.add_parser("overview", help="(for coordinators) the project at a glance")
+    overview.set_defaults(coordinator=True, action="overview")
+
+    group("research", "the research agent").add_parser("start", help="start the research agent").add_argument(
+        "brief", nargs="*", help="what to look into (optional)"
+    )
+    tasks = group("tasks", "the task list")
+    tasks.add_parser("set", help="set the task list, one quoted title per task").add_argument("titles", nargs="*")
+    tasks.add_parser("approve", help="approve the task list")
+
+    task = group("task", "one task")
+    task.add_parser("start", help="start the task's implementer").add_argument("number")
+    publish = task.add_parser("publish", help="push the task's branch and open or update its PR")
     publish.add_argument("number")
     publish.add_argument("--note", default="", help="when updating a PR, a comment saying why")
-    cmds.add_parser("prs", help="ask GitHub about every PR")
+
+    group("prs", "pull requests").add_parser("check", help="ask GitHub about every PR")
+
+    agent = group("agent", "your agents")
+    agent.add_parser("read", help="an agent's latest reply").add_argument("agent")
+    send = agent.add_parser("send", help="message one of your agents")
+    send.add_argument("agent")
+    send.add_argument("message", nargs="+")
+    agent.add_parser("stop", help="stop one of your agents").add_argument("agent")
+
+    wait = sub.add_parser("wait", help="(for coordinators) show the person you're waiting for them")
+    wait.set_defaults(coordinator=True, action="wait")
+    wait.add_argument("reason", nargs="+")
 
 
 def request_args(args: argparse.Namespace) -> tuple[str, dict]:
-    """The inbox request for a changing command."""
-    action = args.action
-    if action == "research":
-        return action, {"brief": " ".join(args.brief)}
-    if action == "plan":
-        return action, {"titles": list(args.titles)}
-    if action in ("start", "publish"):
+    """The inbox request for a command that changes the project."""
+    word, action = args.command, args.action
+    if word == "research":
+        return "research", {"brief": " ".join(args.brief)}
+    if word == "tasks":
+        return ("plan", {"titles": list(args.titles)}) if action == "set" else ("approve", {})
+    if word == "task":
         extra = {"note": args.note} if action == "publish" else {}
-        return action, {"number": args.number, **extra}
-    if action == "send":
-        return action, {"agent": args.agent, "message": " ".join(args.message)}
-    if action == "stop":
-        return action, {"agent": args.agent}
-    if action == "wait":
-        return action, {"reason": " ".join(args.reason)}
-    return action, {}  # approve, prs
+        return action, {"number": args.number, **extra}  # start, publish
+    if word == "prs":
+        return "prs", {}
+    if word == "agent":
+        if action == "send":
+            return "send", {"agent": args.agent, "message": " ".join(args.message)}
+        return "stop", {"agent": args.agent}
+    if word == "wait":
+        return "wait", {"reason": " ".join(args.reason)}
+    raise ValueError(f"not a changing command: {word} {action}")
 
 
 def run(args: argparse.Namespace, ws: Workspace | None = None, env: dict | None = None,
@@ -97,10 +116,10 @@ def run(args: argparse.Namespace, ws: Workspace | None = None, env: dict | None 
         print(NOT_A_COORDINATOR)
         return 2
 
-    if args.action == "status":
+    if args.command == "overview":
         print(render_status(ws, slug, load_roster(ws, slug)))
         return 0
-    if args.action == "read":
+    if args.command == "agent" and args.action == "read":
         from jef.pipeline import PipelineError, last_reply
 
         try:
@@ -117,7 +136,7 @@ def run(args: argparse.Namespace, ws: Workspace | None = None, env: dict | None 
     request_id = inbox.submit(ws, slug, sender, command, payload)
     answer = inbox.wait_for_answer(ws, slug, request_id, wait_seconds)
     if answer is None:
-        print("Jef is still working on that. Check with `jef project status` in a little while.")
+        print("Jef is still working on that. Check with `jef overview` in a little while.")
         return 1
     print(answer.get("message", ""))
     return 0 if answer.get("ok") else 1

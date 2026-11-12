@@ -1,7 +1,7 @@
 """Jef's inbox: requests from coordinators.
 
-A coordinator runs its project with ``jef project …`` commands (see
-``jef.coordinate``). Those commands don't change anything themselves: they
+A coordinator runs its project with its own ``jef`` commands, like
+``jef task start 1`` (see ``jef.coordinate``). Those commands don't change anything themselves: they
 drop a request in the project folder, and the running Jef carries it out
 within a few seconds and writes back the answer. That way Jef is the only
 thing that ever writes the project's files, starts agents or pushes code, so
