@@ -27,11 +27,11 @@ CHECK_TIMEOUT = 120
 INSTALL_HELP = (
     "Jef runs its agents with Claude Code, and the `claude` command isn't installed.\n"
     "Install it (https://code.claude.com/docs/en/quickstart), run `claude` once and sign in,\n"
-    "then start Jef again."
+    "then press Check again in Jef's Settings."
 )
 SIGN_IN_HELP = (
     "Run `claude` in a terminal and sign in (type /login if it doesn't ask),\n"
-    "then start Jef again."
+    "then press Check again in Jef's Settings."
 )
 
 Runner = Callable[..., subprocess.CompletedProcess]

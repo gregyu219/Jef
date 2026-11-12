@@ -125,19 +125,29 @@ def test_plain_jef_means_run(monkeypatch):
     assert seen["port"] == 9100
 
 
-def test_start_stops_if_claude_code_does_not_work(monkeypatch, capsys):
+def test_start_still_starts_if_claude_code_does_not_work(monkeypatch, capsys):
     monkeypatch.setattr(cli.claude, "check", lambda: ClaudeCheck(False, "missing"))
     fake = FakeTmux()
-    assert cli.main(["start"], tmux=make_tmux(fake)) == 1
-    assert "isn't installed" in capsys.readouterr().out
-    assert not any(c[1] == "new-session" for c in fake.calls)
-
-
-def test_run_stops_if_claude_code_is_not_signed_in(monkeypatch, capsys):
-    monkeypatch.setattr(cli.claude, "check", lambda: ClaudeCheck(False, "failed", "Not logged in"))
-    started = []
-    monkeypatch.setattr("uvicorn.run", lambda *a, **k: started.append(1))
-    assert cli.main(["run", "--no-browser"]) == 1
+    assert cli.main(["start"], tmux=make_tmux(fake)) == 0
     out = capsys.readouterr().out
-    assert "Not logged in" in out and "/login" in out
-    assert started == []
+    assert "isn't installed" in out and "starting anyway" in out
+    new = next(c for c in fake.calls if c[1] == "new-session")
+    inner = new[new.index("--") + 1 :]
+    # The background copy is told what the check found, so it doesn't check again.
+    assert "--claude-failed" in inner and inner[inner.index("--claude-failed") + 1] == "missing"
+    assert "--claude-checked" not in inner
+
+
+def test_run_still_starts_if_claude_code_is_not_signed_in(monkeypatch, capsys):
+    monkeypatch.setattr(cli.claude, "check", lambda: ClaudeCheck(False, "failed", "Not logged in"))
+    seen = {}
+
+    def fake_run(app, **kwargs):
+        seen["claude"] = app.state.claude
+        seen["pipeline"] = app.state.pipeline
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+    assert cli.main(["run", "--no-browser"]) == 0
+    out = capsys.readouterr().out
+    assert "Not logged in" in out and "/login" in out and "starting anyway" in out
+    assert not seen["claude"].ok and seen["pipeline"] is None  # no agents, but the pages work

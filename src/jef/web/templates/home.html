@@ -2,7 +2,7 @@
 {% block head %}{% if jef_working %}<meta http-equiv="refresh" content="5">{% endif %}{% endblock %}
 {% block content %}
   {% if claude and not claude.ok %}
-  <div class="banner">Agents can't run until Claude Code works on this computer. <a href="/settings">See what to do in Settings</a>.</div>
+  <div class="banner"><strong>Claude Code isn't working, so agents can't run.</strong> {% if claude.problem == "missing" %}The <code>claude</code> command isn't installed.{% elif claude.detail %}It said: {{ claude.detail }}{% else %}It didn't answer.{% endif %} Your backlog and projects are all here; nothing is lost. <a href="/settings">See what to do in Settings</a>, then press Check again.</div>
   {% endif %}
   <section id="usage">
     <h2>Your Claude usage</h2>

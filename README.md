@@ -34,7 +34,7 @@ The `ln -s` line puts the `jef` command on your PATH, so you can type `jef` from
 | `jef stop` | Stops Jef |
 | `jef run` | Runs Jef in this terminal instead. **Ctrl+C** stops it. Plain `jef` does the same. |
 
-Before it starts, Jef sends Claude Code one tiny message (on the smallest model) to make sure agents will be able to run. If that fails, Jef tells you what to fix and doesn't start.
+When it starts, Jef sends Claude Code one tiny message (on the smallest model) to make sure agents will be able to run. If that fails, Jef still starts: the home page shows your backlog and projects with a message at the top saying what's wrong, and no agent runs. Fix it (install Claude Code, or run `claude` and sign in), then press **Check again** in Settings. Agents can run straight away, with no restart.
 
 Jef's page is at http://127.0.0.1:8765. It only listens on your own computer; nothing else on your network can reach it.
 

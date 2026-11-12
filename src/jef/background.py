@@ -65,20 +65,23 @@ class Tmux:
         value = result.stdout.strip()
         return int(value) if result.returncode == 0 and value.isdigit() else None
 
-    def start_command(self, port: int) -> list[str]:
-        """The tmux command that starts Jef in a new background session."""
+    def start_command(self, port: int, claude_problem: str = "") -> list[str]:
+        """The tmux command that starts Jef in a new background session.
+        ``claude_problem`` is what "jef start"'s check found ("" if it worked),
+        so the background copy doesn't have to check again."""
         cmd = ["tmux", "new-session", "-d", "-s", SESSION]
         # A running tmux server keeps its own environment, so pass JEF_HOME along explicitly.
         if "JEF_HOME" in self.env:
             cmd += ["-e", f"JEF_HOME={self.env['JEF_HOME']}"]
-        inner = [sys.executable, "-m", "jef", "run", "--no-browser", "--claude-checked", "--port", str(port)]
+        checked = ["--claude-failed", claude_problem] if claude_problem else ["--claude-checked"]
+        inner = [sys.executable, "-m", "jef", "run", "--no-browser", *checked, "--port", str(port)]
         if self.which("caffeinate"):
             inner = ["caffeinate", "-is", *inner]
         return cmd + ["--", *inner]
 
-    def start(self, port: int) -> None:
+    def start(self, port: int, claude_problem: str = "") -> None:
         self.require()
-        result = self.runner(self.start_command(port))
+        result = self.runner(self.start_command(port, claude_problem))
         if result.returncode != 0:
             raise RuntimeError(f"tmux couldn't start Jef: {result.stderr.strip()}")
         self.runner(["tmux", "set-option", "-t", TARGET, PORT_OPTION, str(port)])

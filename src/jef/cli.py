@@ -51,13 +51,20 @@ def wait_until_up(port: int, seconds: float = 15) -> bool:
     return False
 
 
-def check_claude() -> ClaudeCheck | None:
-    """Before starting, make sure Claude Code answers. Prints what to do if not."""
+CLAUDE_NOT_WORKING = (
+    "Jef is starting anyway. Agents can't run until Claude Code works; the home page says so,\n"
+    "and Settings has a Check again button for when you've fixed it."
+)
+
+
+def check_claude() -> ClaudeCheck:
+    """Check that Claude Code answers. If it doesn't, say what to do; Jef
+    still starts, so you can see your backlog and projects."""
     print("Checking that Claude Code works…")
     result = claude.check()
     if not result.ok:
         print(result.help)
-        return None
+        print(CLAUDE_NOT_WORKING)
     return result
 
 
@@ -69,41 +76,39 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.claude_checked:
         # "jef start" already checked before starting this background copy.
         status = ClaudeCheck(True, path=claude.find_claude() or "claude")
+    elif args.claude_failed:
+        # "jef start" checked, it didn't work, and it already said so.
+        status = ClaudeCheck(False, args.claude_failed, path=claude.find_claude() or "")
     else:
         status = check_claude()
-        if status is None:
-            return 1
 
-    from jef import jefchat, models
-    from jef.chats import Chats
     from jef.pipeline import Heartbeat, Pipeline
-    from jef.usage import budget_left
     from jef.workspace import Workspace
 
     ws = Workspace.default()
-    chats = Chats(
-        ws,
-        status.path,
-        budget_left=lambda slug: budget_left(ws, slug),
-        model_for=lambda slug, role: models.model_for(ws, slug, role),
-    )
-    jef_chats = jefchat.make_chats(ws, status.path)
-    pipeline = Pipeline(ws, chats)
-    heartbeat = Heartbeat(pipeline)
-    heartbeat.tick_all()  # pick up anything that finished while Jef was off
-    heartbeat.start()
+    heartbeats: list[Heartbeat] = []
+
+    def start_heartbeat(pipeline: Pipeline) -> None:
+        """Called once agents can run: now, or when Check again first works."""
+        heartbeat = Heartbeat(pipeline)
+        heartbeat.tick_all()  # pick up anything that finished while Jef was off
+        heartbeat.start()
+        heartbeats.append(heartbeat)
 
     url = url_for(args.port)
     print(f"Jef is running at {url}  (press Ctrl+C to stop)")
     if not args.no_browser:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+    app = create_app(ws, claude_status=status, on_agents_ready=start_heartbeat)
     try:
-        app = create_app(ws, claude_status=status, chats=chats, pipeline=pipeline, jef_chats=jef_chats)
+        app.state.get_pipeline()  # starts the heartbeat now if Claude Code works
         uvicorn.run(app, host=HOST, port=args.port, log_level="warning")
     finally:
-        heartbeat.stop()
-        chats.stop_running_turns()
-        jef_chats.stop_running_turns()
+        for heartbeat in heartbeats:
+            heartbeat.stop()
+        for runner in (app.state.chats, app.state.jef_chats):
+            if runner is not None:
+                runner.stop_running_turns()
     return 0
 
 
@@ -124,10 +129,9 @@ def cmd_start(args: argparse.Namespace, tmux: Tmux) -> int:
     if is_up(args.port):
         print(f"Port {args.port} is already in use. Try:  jef start --port 9000")
         return 1
-    if check_claude() is None:
-        return 1
+    status = check_claude()
     try:
-        tmux.start(args.port)
+        tmux.start(args.port, "" if status.ok else (status.problem or "failed"))
     except TmuxMissing as err:
         print(err)
         return 1
@@ -202,6 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_port(run)
     # Internal: "jef start" passes this to the copy it runs in tmux, so the check isn't made twice.
     run.add_argument("--claude-checked", action="store_true", help=argparse.SUPPRESS)
+    run.add_argument("--claude-failed", default="", help=argparse.SUPPRESS)
     add_port(sub.add_parser("start", help="run Jef in the background with tmux"))
     sub.add_parser("status", help="is Jef running, and where?")
     sub.add_parser("attach", help="watch the background session")
