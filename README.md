@@ -8,45 +8,42 @@ You tell Jef what you want built. Jef keeps a backlog, and when you say go, it h
 
 ## Running Jef
 
-### First time
+### Install (once)
 
 ```
 git clone git@github.com:gregyu219/Jef.git
 cd Jef
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
+mkdir -p ~/.local/bin
+ln -s "$PWD/.venv/bin/jef" ~/.local/bin/jef
+brew install tmux
 ```
 
-### Start it
+The `ln -s` line puts the `jef` command on your PATH, so you can type `jef` from any folder. (If `jef` isn't found afterwards, add `~/.local/bin` to your PATH.) Because Jef is installed in editable mode, code changes take effect without reinstalling.
 
-```
-.venv/bin/jef
-```
+### Commands
 
-Your browser opens to http://127.0.0.1:8765. Press **Ctrl+C** to stop. Jef only listens on your own computer; nothing else on your network can reach it.
+| Command | What it does |
+| --- | --- |
+| `jef start` | Runs Jef in the background and opens your browser. Keeps going after you close the terminal. |
+| `jef status` | Shows whether Jef is running, and its address |
+| `jef attach` | Opens Jef's background session so you can watch it. Press **Ctrl+B**, then **D**, to leave it running. |
+| `jef stop` | Stops Jef |
+| `jef run` | Runs Jef in this terminal instead. **Ctrl+C** stops it. Plain `jef` does the same. |
 
-Options: `--port 9000` to use another port, `--no-browser` to skip opening the browser. Set `JEF_HOME=/some/folder` to use a different workspace than `~/.jef`.
+Jef's page is at http://127.0.0.1:8765. It only listens on your own computer; nothing else on your network can reach it.
 
-### Keep it running all the time (tmux)
+Options for `start` and `run`: `--port 9000` to use another port, `--no-browser` to skip opening the browser. Set `JEF_HOME=/some/folder` to use a different workspace than `~/.jef`.
 
-Coordinators heartbeat every hour, so Jef needs to stay running. [tmux](https://github.com/tmux/tmux) keeps it going after you close the Terminal window.
+### Running all the time
 
-```
-brew install tmux                        # once
-tmux new -s jef                          # start a session named "jef"
-caffeinate -is .venv/bin/jef --no-browser
-```
+Coordinators heartbeat every hour, so Jef needs to stay running. `jef start` handles that: it runs Jef inside a background [tmux](https://github.com/tmux/tmux) session named `jef`, wrapped in `caffeinate -is` so your Mac doesn't fall asleep while it's plugged in.
 
-`caffeinate -is` stops your Mac from sleeping while Jef runs (`-s` only applies when plugged in).
-
-- **Leave it running:** press **Ctrl+B**, then **D**. Jef keeps running in the background.
-- **Check on it:** `tmux attach -t jef`
-- **Stop it:** attach, then press **Ctrl+C**.
-
-Things tmux can't help with:
+Things it can't help with:
 
 - **Sleep:** if your Mac sleeps, Jef pauses until it wakes. Closing a laptop lid puts it to sleep unless it's plugged in with an external display.
-- **Restarts:** after a reboot, start the tmux session again.
+- **Restarts:** after a reboot, run `jef start` again.
 
 ## How it works
 
