@@ -12,10 +12,17 @@ from jef.usage import (
     agent_usage,
     budget_left,
     budget_usd,
+    SpendingLimit,
     format_cost,
     latest_plan_usage,
+    limit_left,
     parse_budget,
+    parse_limit,
+    period_start,
     plan_windows,
+    set_spending_limit,
+    spending_limit,
+    spent_since,
 )
 from jef.usage import format_tokens, project_total, project_usage, usage_from_event
 from jef.web.app import create_app, format_reset
@@ -245,3 +252,56 @@ def test_pages_show_usage(tmp_path):
     agent = client.get("/projects/demo/agents/ada").text
     assert "348.8k tokens · $0.45 estimated · 2 turns" in agent
     assert "$0.45" in client.get("/").text
+
+
+def sent(at):
+    return {"type": "jef_sent", "from": "you", "text": "hi", "at": at}
+
+
+def test_dated_turns_count_toward_the_day_and_month_they_started(tmp_path):
+    now = datetime(2026, 11, 11, 15, 0).astimezone()
+    log = tmp_path / "ada.jsonl"
+    write_log(
+        log,
+        RESULT,  # from before Jef dated its messages: not in any period
+        sent(datetime(2026, 10, 31, 23, 0).astimezone().isoformat()),
+        {**RESULT, "total_cost_usd": 1.0},  # last month
+        sent(datetime(2026, 11, 2, 9, 0).astimezone().isoformat()),
+        {**RESULT, "total_cost_usd": 2.0},  # this month
+        sent("2026-11-11T08:00:00"),  # no zone: local time
+        {**RESULT, "total_cost_usd": 4.0},  # today
+        sent("nonsense"),
+        {**RESULT, "total_cost_usd": 8.0},  # undated
+    )
+    assert period_start("day", now) == datetime(2026, 11, 11).astimezone()
+    assert period_start("month", now) == datetime(2026, 11, 1).astimezone()
+    assert agent_usage(log, period_start("day", now)).cost_usd == 4.0
+    assert agent_usage(log, period_start("month", now)).cost_usd == 6.0
+    assert abs(agent_usage(log).cost_usd - 15.2268) < 1e-9  # no date given: everything
+
+    ws = Workspace(tmp_path / "jef")
+    write_log(ws.project_dir("one") / "chats" / "ada.jsonl", sent(now.isoformat()), {**RESULT, "total_cost_usd": 1.5})
+    write_log(ws.project_dir("two") / "chats" / "bo.jsonl", sent(now.isoformat()), {**RESULT, "total_cost_usd": 2.5})
+    assert spent_since(ws, period_start("day", now)) == 4.0
+
+
+def test_spending_limit_in_settings_md(tmp_path):
+    assert parse_limit("50.00 USD per day") == SpendingLimit(50.0, "day")
+    assert parse_limit("$200 per month") == SpendingLimit(200.0, "month")
+    for nothing in ("", "none", "50 USD", "50 per week", "0 USD per day", "lots per day"):
+        assert parse_limit(nothing) is None
+
+    ws = Workspace(tmp_path)
+    assert spending_limit(ws) is None and limit_left(ws) is None
+    set_spending_limit(ws, SpendingLimit(5, "day"))
+    assert ws.settings_file.read_text() == "# Jef settings\n\n- Spending limit: 5.00 USD per day\n"
+    ws.settings_file.write_text(ws.settings_file.read_text() + "- Something else: kept\n")
+    set_spending_limit(ws, SpendingLimit(30, "month"))
+    set_spending_limit(ws, SpendingLimit(3, "day"))
+    text = ws.settings_file.read_text()
+    assert text.count("Spending limit") == 1 and "Something else: kept" in text
+    now = datetime.now().astimezone()
+    write_log(ws.project_dir("demo") / "chats" / "ada.jsonl", sent(now.isoformat()), {**RESULT, "total_cost_usd": 1.25})
+    assert limit_left(ws, now) == 1.75
+    set_spending_limit(ws, None)
+    assert spending_limit(ws) is None and "Spending limit: none" in ws.settings_file.read_text()

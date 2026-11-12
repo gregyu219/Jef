@@ -39,7 +39,7 @@
     </form>
     {% endif %}
     {% endif %}
-    {% if error and error not in ["empty", "busy", "stopped", "claude", "budget"] %}<p class="error">{{ error }}</p>{% endif %}
+    {% if error and error not in ["empty", "busy", "stopped", "claude", "budget", "limit"] %}<p class="error">{{ error }}</p>{% endif %}
   </section>
 
   <section>
@@ -70,6 +70,7 @@
     {% if error == "stopped" %}<p class="error">{{ project.coordinator }} has been stopped.</p>{% endif %}
     {% if error == "claude" %}<p class="error">Claude Code isn't working right now. See Settings.</p>{% endif %}
     {% if error == "budget" %}<p class="error">This project's budget is used up. Raise it under Usage to keep going.</p>{% endif %}
+    {% if error == "limit" %}<p class="error">Jef's overall spending limit is used up for now. It starts again next {{ limit.period if limit else "day or month" }}, or raise it in <a href="/settings">Settings</a>.</p>{% endif %}
   </section>
 
   <section>
@@ -106,6 +107,9 @@
       <button type="submit" class="secondary">Save</button>
     </form>
     <p class="hint">When the estimated cost reaches the budget, Jef pauses this project: no agent starts another turn until you raise it. Leave it empty for no budget.</p>
+    {% if limit %}
+    <p class="hint">Overall spending limit (all projects): {{ limit_spent | cost }} of {{ limit.amount_usd | cost }} used {{ limit.when }}. Change it in <a href="/settings">Settings</a>.</p>
+    {% endif %}
   </section>
 
   <section>

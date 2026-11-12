@@ -17,11 +17,13 @@ from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Agent, Chats, ChatError, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
-from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError
+from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError, check_spending_limit
 from jef.projects import StartError, gh_clone, known_repos, load_project, parse_repo, projects_on_repo, start_project, used_backlog_numbers
 from jef.status import read_status, status_path, write_status
 from jef.tasks import TaskList, TaskStatus
 from jef.usage import (
+    PERIODS,
+    SpendingLimit,
     Usage,
     agent_usage,
     budget_left,
@@ -29,9 +31,13 @@ from jef.usage import (
     format_cost,
     format_tokens,
     latest_plan_usage,
+    limit_left,
+    limit_spent,
     project_total,
     project_usage,
+    spending_limit,
 )
+from jef.usage import set_spending_limit as save_spending_limit
 from jef.workspace import Workspace
 
 
@@ -147,7 +153,9 @@ def create_app(
         """Agents can only run once Claude Code has been checked and works."""
         status = app.state.claude
         if app.state.chats is None and status is not None and status.ok:
-            app.state.chats = Chats(ws, status.path, budget_left=lambda slug: budget_left(ws, slug))
+            app.state.chats = Chats(
+                ws, status.path, budget_left=lambda slug: budget_left(ws, slug), limit_left=lambda: limit_left(ws)
+            )
         return app.state.chats
 
     def get_jef_chats() -> Chats | None:
@@ -332,6 +340,7 @@ def create_app(
         agents = runner.refresh(slug) if runner else []
         coordinator = next((a for a in agents if a.name == project.coordinator_agent), None)
         usage = project_usage(ws, slug)
+        limit = spending_limit(ws)
         checked = flow.last_checked(slug) if flow else None
         return TEMPLATES.TemplateResponse(
             request,
@@ -358,6 +367,8 @@ def create_app(
                 "usage": usage,
                 "usage_total": sum(usage.values(), Usage()),
                 "budget": budget_usd(ws, slug),
+                "limit": limit,
+                "limit_spent": limit_spent(ws, limit) if limit else 0.0,
                 "no_usage": Usage(),
                 "error": error,
             },
@@ -453,7 +464,14 @@ def create_app(
             runner.send(slug, project.coordinator_agent, message.strip())
         except ChatError as err:
             said = str(err)
-            reason = "busy" if "still working" in said else "budget" if "budget" in said else "stopped"
+            if "still working" in said:
+                reason = "busy"
+            elif "budget" in said:
+                reason = "budget"
+            elif "spending limit" in said:
+                reason = "limit"
+            else:
+                reason = "stopped"
             return RedirectResponse(f"/projects/{slug}?error={reason}", status_code=303)
         return RedirectResponse(f"/projects/{slug}", status_code=303)
 
@@ -470,6 +488,7 @@ def create_app(
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings(request: Request, notice: str = "", error: str = ""):
+        limit = spending_limit(ws)
         return TEMPLATES.TemplateResponse(
             request,
             "settings.html",
@@ -477,10 +496,36 @@ def create_app(
                 "page": "settings",
                 "claude": app.state.claude,
                 "github": github_check(),
+                "limit": limit,
+                "limit_spent": limit_spent(ws, limit) if limit else 0.0,
+                "periods": PERIODS,
                 "notice": notice,
                 "error": error,
             },
         )
+
+    @app.post("/settings/spending-limit")
+    def set_spending_limit(amount: str = Form(""), period: str = Form("day")):
+        from urllib.parse import quote
+
+        text = amount.strip().removeprefix("$").replace(",", "")
+        if text.lower() in ("", "none"):
+            limit = None
+        else:
+            try:
+                limit = SpendingLimit(float(text), period)
+            except ValueError:
+                return RedirectResponse("/settings?error=" + quote("Type a dollar amount, like 50."), status_code=303)
+        flow = get_pipeline()
+        try:
+            if flow is not None:
+                flow.set_spending_limit(limit)  # also pauses or resumes projects
+            else:
+                check_spending_limit(limit)
+                save_spending_limit(ws, limit)
+        except PipelineError as err:
+            return RedirectResponse("/settings?error=" + quote(str(err)), status_code=303)
+        return RedirectResponse("/settings?notice=limit", status_code=303)
 
     @app.post("/settings/claude-check")
     def check_claude_again():

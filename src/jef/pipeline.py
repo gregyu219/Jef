@@ -87,11 +87,22 @@ PR_BLOCK = re.compile(r"```pr\s*\n(.*?)```", re.S | re.I)
 MAX_PUBLISH_ATTEMPTS = 3
 PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 BUDGET_PROBLEM = "Budget reached"  # how a budget pause starts, so raising the budget can lift it
+LIMIT_PROBLEM = "Spending limit reached"  # the same for the overall daily or monthly limit
 MAX_BUDGET_USD = 100_000
 
 
 class PipelineError(RuntimeError):
     pass
+
+
+def check_spending_limit(limit: usage.SpendingLimit | None) -> None:
+    """Raise PipelineError unless the overall limit is None or sensible."""
+    if limit is None:
+        return
+    if not 0 < limit.amount_usd <= MAX_BUDGET_USD:
+        raise PipelineError(f"Pick a limit above $0 and up to ${MAX_BUDGET_USD:,}, or leave it empty for none.")
+    if limit.period not in usage.PERIODS:
+        raise PipelineError("Pick a limit per day or per month.")
 
 
 # ---- reading agent replies
@@ -312,24 +323,55 @@ class Pipeline:
             raise PipelineError(f"Pick a budget above $0 and up to ${MAX_BUDGET_USD:,}, or leave it empty for none.")
         with self.chats.lock:
             set_goal_field(self.workspace, slug, "Budget", f"{amount:.2f} USD" if amount is not None else "none")
-            over = self._budget_problem(slug)
-            if over:
+            self._update_spending_pause(slug)
+
+    def spending_limit(self) -> usage.SpendingLimit | None:
+        return usage.spending_limit(self.workspace)
+
+    def set_spending_limit(self, limit: usage.SpendingLimit | None) -> None:
+        """Set the overall limit across all projects, or None for no limit.
+        Every project's pause starts or lifts straight away."""
+        check_spending_limit(limit)
+        with self.chats.lock:
+            usage.set_spending_limit(self.workspace, limit)
+            for slug in self.workspace.project_slugs():
+                if load_project(self.workspace, slug) is None:
+                    continue
+                if self.phase(slug) not in (Phase.DONE, Phase.STOPPED):
+                    self._update_spending_pause(slug)
+
+    def _update_spending_pause(self, slug: str) -> str:
+        """Pause the project if its budget or the overall limit is used up,
+        or lift such a pause once it isn't. Returns why it's paused, or ""."""
+        over = self._budget_problem(slug)
+        if over:
+            if self.problem(slug) != over:
                 set_goal_field(self.workspace, slug, "Problem", over)
-            elif self.problem(slug).startswith(BUDGET_PROBLEM):
-                set_goal_field(self.workspace, slug, "Problem", "none")
+        elif self.problem(slug).startswith((BUDGET_PROBLEM, LIMIT_PROBLEM)):
+            set_goal_field(self.workspace, slug, "Problem", "none")
+        return over
 
     def _budget_problem(self, slug: str) -> str:
-        """Why the project is paused for its budget, or "" if it isn't."""
+        """Why the project is paused for its budget or the overall limit, or
+        "" if it isn't."""
         budget = self.budget_usd(slug)
-        if budget is None:
-            return ""
-        spent = usage.project_total(self.workspace, slug).cost_usd
-        if spent < budget:
-            return ""
-        return (
-            f"{BUDGET_PROBLEM}: {usage.format_cost(spent)} of {usage.format_cost(budget)} used (estimated). "
-            "Raise the budget to carry on."
-        )
+        if budget is not None:
+            spent = usage.project_total(self.workspace, slug).cost_usd
+            if spent >= budget:
+                return (
+                    f"{BUDGET_PROBLEM}: {usage.format_cost(spent)} of {usage.format_cost(budget)} used (estimated). "
+                    "Raise the budget to carry on."
+                )
+        limit = self.spending_limit()
+        if limit is not None:
+            spent = usage.limit_spent(self.workspace, limit)
+            if spent >= limit.amount_usd:
+                return (
+                    f"{LIMIT_PROBLEM}: {usage.format_cost(spent)} of {usage.format_cost(limit.amount_usd)} "
+                    f"used {limit.when} across all projects (estimated). "
+                    f"Jef carries on next {limit.period}, or raise the limit in Settings."
+                )
+        return ""
 
     def phase(self, slug: str) -> Phase:
         return project_phase(self.workspace, slug, self.chats.refresh(slug))
@@ -375,11 +417,9 @@ class Pipeline:
         with self.chats.lock:
             if load_project(self.workspace, slug) is None or self.phase(slug) in (Phase.DONE, Phase.STOPPED):
                 return
-            over = self._budget_problem(slug)
-            if over:
-                # Paused: no new turns, and replies wait until the budget is raised.
-                if self.problem(slug) != over:
-                    set_goal_field(self.workspace, slug, "Problem", over)
+            if self._update_spending_pause(slug):
+                # Paused: no new turns, and replies wait until the budget is
+                # raised or the overall limit's day or month is over.
                 return
             for agent in self.chats.refresh(slug):
                 if agent.status is Status.WORKING:
@@ -430,7 +470,7 @@ class Pipeline:
     def _on_reply(self, slug: str, agent: Agent, reply: Reply) -> None:
         if reply.is_error:
             if "budget" in reply.subtype:
-                agent.note = "Last turn stopped partway: it reached the project budget"
+                agent.note = "Last turn stopped partway: it reached the budget or spending limit"
             else:
                 agent.note = "Last turn failed: " + _short(reply.text or reply.subtype)
             return

@@ -26,6 +26,11 @@ class Workspace:
         return self.root / "backlog.md"
 
     @property
+    def settings_file(self) -> Path:
+        """Settings that cover all of Jef, like the overall spending limit."""
+        return self.root / "settings.md"
+
+    @property
     def projects_dir(self) -> Path:
         return self.root / "projects"
 
