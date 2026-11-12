@@ -19,6 +19,7 @@ from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
 from jef.pipeline import Phase, Pipeline, PipelineError, pr_label
 from jef.projects import (
+    MAX_IMPLEMENTERS_AT_ONCE,
     DeleteError,
     StartError,
     delete_project,
@@ -450,6 +451,7 @@ def create_app(
                 "model_choices": models.CHOICES,
                 "last_checked": ago(flow.now() - checked) if checked is not None else "",
                 "at_once": implementers_at_once(ws, slug),
+                "max_at_once": MAX_IMPLEMENTERS_AT_ONCE,
                 "usage": usage,
                 "usage_total": sum(usage.values(), Usage()),
                 "budget": budget_usd(ws, slug),
@@ -493,6 +495,12 @@ def create_app(
         if not minutes.strip().isdigit():
             return RedirectResponse(f"/projects/{slug}?error=Type+a+number+of+minutes.", status_code=303)
         return pipeline_action(slug, lambda flow: flow.set_heartbeat_minutes(slug, int(minutes)))
+
+    @app.post("/projects/{slug}/implementers")
+    def set_implementers(slug: str, count: str = Form("")):
+        if not count.strip().isdigit():
+            return RedirectResponse(f"/projects/{slug}?error=Type+a+number+of+tasks.", status_code=303)
+        return pipeline_action(slug, lambda flow: flow.set_implementers_at_once(slug, int(count)))
 
     @app.post("/projects/{slug}/models")
     def set_models(slug: str, coordinator: str = Form(""), research: str = Form(""), implementer: str = Form("")):
