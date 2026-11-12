@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} · Jef{% endblock %}
+{% block head %}{% if working %}<meta http-equiv="refresh" content="5">{% endif %}{% endblock %}
+{% block content %}
+  <section>
+    <h2>{{ project.name }}</h2>
+    <p class="hint">Repo <a href="https://github.com/{{ project.repo }}">{{ project.repo }}</a> · Coordinator <strong>{{ project.coordinator }}</strong>{% if coordinator %} · <span class="pill {{ coordinator.status.value | lower }}">{{ coordinator.status.value }}</span>{% endif %}</p>
+  </section>
+
+  <section>
+    <h2>Chat with {{ project.coordinator }}</h2>
+    {% if working %}<p class="hint">Working… this page refreshes by itself.</p>{% endif %}
+    {% if chat %}
+    <ol class="chat">
+      {% for line in chat %}
+      <li class="{{ line.kind }}">{{ line.text }}</li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="empty">No messages yet.</p>
+    {% endif %}
+    {% if coordinator and coordinator.status.value != "Stopped" %}
+    <form method="post" action="/projects/{{ project.slug }}/message">
+      <input type="text" name="message" placeholder="Message {{ project.coordinator }}" aria-label="Message {{ project.coordinator }}" autocomplete="off">
+      <button type="submit">Send</button>
+    </form>
+    <form method="post" action="/projects/{{ project.slug }}/stop">
+      <button type="submit" class="secondary">Stop {{ project.coordinator }} and its agents</button>
+    </form>
+    {% elif coordinator %}
+    <p class="empty">{{ project.coordinator }} has been stopped.</p>
+    {% endif %}
+    {% if error == "empty" %}<p class="error">Type a message first.</p>{% endif %}
+    {% if error == "busy" %}<p class="error">{{ project.coordinator }} is still working on the last message. Send this when it's done.</p>{% endif %}
+    {% if error == "stopped" %}<p class="error">{{ project.coordinator }} has been stopped.</p>{% endif %}
+    {% if error == "claude" %}<p class="error">Claude Code isn't working right now. See Settings.</p>{% endif %}
+  </section>
+
+  <section>
+    <h2>Agents</h2>
+    {% if agents %}
+    <table>
+      <thead><tr><th>Name</th><th>Role</th><th>Spawned by</th><th>Status</th></tr></thead>
+      <tbody>
+      {% for a in agents %}
+        <tr><td>{{ a.name }}</td><td>{{ a.role.value }}</td><td>{{ a.parent or "you" }}</td><td>{{ a.status.value }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">No agents yet.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Tasks</h2>
+    {% if tasks %}
+    <table>
+      <thead><tr><th>#</th><th>Task</th><th>Status</th><th>Agent</th><th>PR</th></tr></thead>
+      <tbody>{% for t in tasks %}<tr><td class="num">{{ t.number }}</td><td>{{ t.title }}</td><td>{{ t.status.value }}</td><td>{{ t.agent }}</td><td>{{ t.pr }}</td></tr>{% endfor %}</tbody>
+    </table>
+    {% else %}
+    <p class="empty">No tasks yet. The research agent and task planning come next.</p>
+    {% endif %}
+  </section>
+{% endblock %}

@@ -4,7 +4,7 @@
 
 You tell Jef what you want built. Jef keeps a backlog, and when you say go, it hands the work to a team of AI agents. Each piece of work comes back as a pull request on GitHub, and you decide what gets merged.
 
-> Status: early development. Jef is building itself first. Nothing runs yet.
+> Status: early development. Jef is building itself first. You can add backlog items, start a project and chat with its coordinator. Research, task planning and implementers come next.
 
 ## Running Jef
 

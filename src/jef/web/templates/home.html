@@ -5,7 +5,7 @@
   {% endif %}
   <section>
     <h2>Backlog</h2>
-    <p class="hint">Everything you've asked for. Nothing starts until you confirm.</p>
+    <p class="hint">Everything you've asked for. Nothing starts until you press Start and confirm.</p>
     {% if backlog %}
     <table>
       <thead><tr><th>#</th><th>Feature</th><th>Status</th><th>Coordinator</th></tr></thead>
@@ -15,7 +15,11 @@
           <td class="num">{{ item.number }}</td>
           <td>{{ item.feature }}</td>
           <td><span class="pill {{ item.status.value | lower | replace(' ', '-') }}">{{ item.status.value }}</span></td>
-          <td>{{ item.coordinator or "—" }}</td>
+          <td>
+            {% if item.status == waiting %}<a class="start" href="/backlog/{{ item.number }}/start">Start…</a>
+            {% elif item.coordinator in coordinator_pages %}<a href="/projects/{{ coordinator_pages[item.coordinator] }}">{{ item.coordinator }}</a>
+            {% else %}{{ item.coordinator or "—" }}{% endif %}
+          </td>
         </tr>
       {% endfor %}
       </tbody>
@@ -39,7 +43,7 @@
       <tbody>
       {% for p in projects %}
         <tr>
-          <td>{{ p.name }}</td>
+          <td><a href="/projects/{{ p.slug }}">{{ p.name }}</a></td>
           <td>{{ p.merged }} of {{ p.total }}</td>
           <td>
             <div class="bar" role="img" aria-label="{% for s in statuses %}{{ p.counts[s] }} {{ s.value }}{% if not loop.last %}, {% endif %}{% endfor %}">
