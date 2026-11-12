@@ -7,9 +7,10 @@ from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Chats, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus
-from jef.pipeline import Phase, Pipeline, PipelineError, parse_pr, parse_status, parse_tasks
+from jef.pipeline import Heartbeat, Phase, Pipeline, PipelineError, parse_pr, parse_status, parse_tasks
 from jef.publish import PublishError
 from jef.projects import goal_fields, slugify, start_project
+from jef.status import read_status, status_path
 from jef.tasks import TaskStatus
 from jef.web.app import ago, create_app
 from jef.workspace import Workspace
@@ -525,3 +526,46 @@ def test_ready_again_updates_the_open_pr(w):
     w.reply("impl-1", "Renamed.\nSTATUS: ready")  # no block needed the second time
     assert len(w.publisher.calls) == 2
     assert w.agent("impl-1").note == "PR updated, waiting for your review"
+
+
+def test_status_md_follows_the_project_through_every_phase(w):
+    beat = Heartbeat(w.pipeline)
+    slug = w.slug
+
+    def phase():
+        beat.tick_all()
+        return read_status(w.ws, slug)["phase"]
+
+    # start_project writes the first one before any tick.
+    assert read_status(w.ws, slug)["phase"] == "Understanding"
+    assert read_status(w.ws, slug)["coordinator"] == "Ada (Working)"
+    w.reply("ada", "Starting.\nACTION: start-research")
+    assert phase() == "Research"
+    assert read_status(w.ws, slug)["coordinator note"] == "Started research"
+    w.reply("research", "# Research\n\nFindings.")
+    assert phase() == "Planning"
+    w.reply("ada", "```tasks\n1. Show it\n```")
+    assert phase() == "Waiting for your approval"
+    w.pipeline.approve_tasks(slug)
+    assert read_status(w.ws, slug)["phase"] == "Building"  # written straight away
+    assert "| 1 | Show it | Implementation | impl-1 | Working | |" in status_path(w.ws, slug).read_text()
+    w.reply("impl-1", READY)
+    w.pr_states["https://github.com/gregyu219/Jef/pull/20"] = "MERGED"
+    w.clock += 301
+    assert phase() == "Done"
+    fields = read_status(w.ws, slug)
+    assert fields["tasks"] == "1 of 1 merged"
+    assert fields["coordinator"] == "Ada (Stopped)"
+
+
+def test_a_stopped_project_still_gets_a_status(w):
+    w.chats.stop(w.slug, "ada")
+    Heartbeat(w.pipeline).tick_all()  # tick skips Stopped projects; the status is still written
+    assert read_status(w.ws, w.slug)["phase"] == "Stopped"
+
+
+def test_check_now_writes_the_status(w):
+    w.reply("ada", "ACTION: start-research")
+    status_path(w.ws, w.slug).unlink()
+    w.pipeline.check_now(w.slug)
+    assert read_status(w.ws, w.slug)["phase"] == "Research"
