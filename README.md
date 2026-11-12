@@ -169,6 +169,10 @@ Each project can have a dollar budget, set under Usage on its project page (it's
 
 Spending can still go a little over: a turn's cost is only known once it's finished, and Claude Code stops a turn a bit after it reaches its cap.
 
+### Models
+
+Each level of a project runs on its own model: Sonnet for the coordinator, Opus for research and implementers. Change them under Models on the project page (they're saved as lines like `- Coordinator model: haiku` in `goal.md`). Pick `haiku`, `sonnet`, `opus`, `fable`, or `default` for Claude Code's own default. A change applies from each agent's next turn. That first turn on the new model re-reads its conversation without the prompt cache, so it costs a little more.
+
 You're responsible for using Claude Code within [Anthropic's terms](https://www.anthropic.com/legal) for the account you sign in with.
 
 ## Where Jef keeps things

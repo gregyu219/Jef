@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from jef import inbox, skills, usage
+from jef import inbox, models, skills, usage
 from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Agent, Chats, ChatError, Role, Status, load_roster
 from jef.projects import DEFAULT_HEARTBEAT_MINUTES, goal_fields, load_project, set_goal_field
@@ -227,6 +227,23 @@ class Pipeline:
 
     def set_coordinator_decides(self, slug: str, on: bool) -> None:
         set_goal_field(self.workspace, slug, "Coordinator decides", "yes" if on else "no")
+
+    def models(self, slug: str) -> dict[Role, str]:
+        """Each level's model for this project: one of ``models.CHOICES``."""
+        return {role: models.model_setting(self.workspace, slug, role) for role in models.LEVELS}
+
+    def set_models(self, slug: str, chosen: dict[Role, str]) -> None:
+        """Save the chosen models in goal.md. Each agent picks its level's
+        model up on its next turn. Nothing is saved if any choice is unknown."""
+        cleaned = {}
+        for role, value in chosen.items():
+            value = value.strip().lower()
+            if role not in models.LEVELS or value not in models.CHOICES:
+                raise PipelineError(f"Pick one of {', '.join(models.CHOICES)} for the {role.value.lower()} model.")
+            cleaned[role] = value
+        with self.chats.lock:
+            for role, value in cleaned.items():
+                set_goal_field(self.workspace, slug, models.LEVELS[role], value)
 
     def budget_usd(self, slug: str) -> float | None:
         return usage.budget_usd(self.workspace, slug)

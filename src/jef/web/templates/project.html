@@ -146,6 +146,20 @@
   {% endif %}
 
   <section>
+    <h2>Models</h2>
+    <p class="hint">Which Claude model each level of this project runs on. Haiku is cheapest and fastest; Opus and Fable are strongest. "default" uses Claude Code's own default.</p>
+    <form method="post" action="/projects/{{ project.slug }}/models">
+      {% for name, label, setting in models %}
+      <label>{{ label }} <select name="{{ name }}">
+        {% for choice in model_choices %}<option value="{{ choice }}"{% if choice == setting %} selected{% endif %}>{{ choice }}</option>{% endfor %}
+      </select></label>
+      {% endfor %}
+      <button type="submit" class="secondary">Save</button>
+    </form>
+    <p class="hint">A change applies from each agent's next turn. The first turn after a change re-reads its whole conversation without the cache, so it costs a little more.</p>
+  </section>
+
+  <section>
     <h2>Heartbeat</h2>
     <p class="hint">How often Jef wakes {{ project.coordinator }} to check on the project: nudge implementers, look at PRs, start the next task. Jef also wakes {{ project.coordinator }} straight away when one of its agents finishes a turn.</p>
     <form method="post" action="/projects/{{ project.slug }}/heartbeat">
