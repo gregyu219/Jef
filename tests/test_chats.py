@@ -86,6 +86,21 @@ def test_turns_are_capped_at_what_is_left_of_the_budget(setup):
     assert procs[2].cmd[procs[2].cmd.index("--max-budget-usd") + 1] == "0.01"
 
 
+def test_each_turn_runs_on_the_model_chosen_for_its_level(setup):
+    ws, repo, chats, procs = setup
+    chats.spawn("todo", "free", Role.IMPLEMENTER, "No model chosen", repo)
+    assert "--model" not in procs[0].cmd
+    chosen = {Role.IMPLEMENTER: "opus"}
+    chats.model_for = lambda project, role: chosen.get(role, "")
+    chats.spawn("todo", "impl-1", Role.IMPLEMENTER, "Build it", repo)
+    cmd = procs[1].cmd
+    assert cmd[cmd.index("--model") + 1] == "opus"
+    procs[1].done = True
+    chosen[Role.IMPLEMENTER] = "sonnet"  # changed between turns: the next turn uses it
+    chats.send("todo", "impl-1", "more")
+    assert procs[2].cmd[procs[2].cmd.index("--model") + 1] == "sonnet"
+
+
 def test_no_turn_starts_once_the_budget_is_used_up(setup):
     ws, repo, chats, procs = setup
     chats.spawn("todo", "impl-1", Role.IMPLEMENTER, "Build it", repo)

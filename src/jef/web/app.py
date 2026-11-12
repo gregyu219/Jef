@@ -12,7 +12,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from jef import claude, jefchat
+from jef import claude, jefchat, models
 from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Agent, Chats, ChatError, Status, load_roster
 from jef.claude import ClaudeCheck
@@ -174,7 +174,12 @@ def create_app(
         """Agents can only run once Claude Code has been checked and works."""
         status = app.state.claude
         if app.state.chats is None and status is not None and status.ok:
-            app.state.chats = Chats(ws, status.path, budget_left=lambda slug: budget_left(ws, slug))
+            app.state.chats = Chats(
+                ws,
+                status.path,
+                budget_left=lambda slug: budget_left(ws, slug),
+                model_for=lambda slug, role: models.model_for(ws, slug, role),
+            )
         return app.state.chats
 
     def get_jef_chats() -> Chats | None:

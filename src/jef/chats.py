@@ -248,6 +248,9 @@ class Chats:
     # Dollars left in a project's budget, or None for no budget. Passed in
     # (see ``usage.budget_left``) so this module doesn't import the projects code.
     budget_left: Callable[[str], float | None] = lambda project: None
+    # The model for an agent's turn, or "" for the role's own (see
+    # ``models.model_for``). Looked up on every turn, so a change applies next turn.
+    model_for: Callable[[str, Role], str] = lambda project, role: ""
     _running: dict[tuple[str, str], subprocess.Popen] = field(default_factory=dict)
     # The web pages and the heartbeat both change agents.md; one at a time.
     lock: threading.RLock = field(default_factory=threading.RLock)
@@ -284,8 +287,9 @@ class Chats:
         cmd += ["--permission-mode", "acceptEdits", "--permission-prompts", "none"]
         cmd += ["--allowedTools", *policy.allowed_tools]
         cmd += ["--disallowedTools", *ALWAYS_DENIED, *policy.denied]
-        if policy.model:
-            cmd += ["--model", policy.model]
+        model = self.model_for(project, agent.role) or policy.model
+        if model:
+            cmd += ["--model", model]
         if budget_left is not None:
             # Claude Code stops this one run once it has spent what's left. It
             # doesn't count earlier runs, which is why Jef passes the remainder.
