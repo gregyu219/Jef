@@ -144,14 +144,18 @@ STARTED_AND_WAITING = """# Backlog
 WITH_DONE = STARTED_AND_WAITING + "| 3 | Weekly email summary | Done | Bea |\n"
 
 
-def test_home_page_shows_delete_for_waiting_and_done_items_only(ws, client):
+def test_home_page_shows_delete_for_items_in_every_state(ws, client):
     ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
     ws.backlog_file.write_text(WITH_DONE)
-    page = client.get("/")
-    assert 'action="/backlog/2/delete"' in page.text
-    assert 'action="/backlog/3/delete"' in page.text
-    assert 'action="/backlog/1/delete"' not in page.text
-    assert "Its project and PRs stay." in page.text
+    make_status_project(ws, "todo-app")
+    goal = ws.project_dir("todo-app") / "goal.md"
+    goal.write_text(goal.read_text().replace("- Repo:", "- Backlog item: #1\n- Repo:"))
+    page = client.get("/").text
+    for number in (1, 2, 3):
+        assert f'action="/backlog/{number}/delete"' in page
+    # Only the item with a project warns that the project goes too.
+    assert page.count("and its project? This stops its agents") == 1
+    assert "Delete “Dark mode” from the backlog?" in page.replace("\\u201c", "“").replace("\\u201d", "”")
 
 
 def test_backlog_shows_needs_you_with_a_link_to_the_pr(ws, client):
@@ -171,7 +175,6 @@ def test_backlog_shows_needs_you_with_a_link_to_the_pr(ws, client):
     assert page.count(">Needs you</span>") == 1
     assert 'href="https://github.com/o/r/pull/34"' in page and "PR #34 to review</a>" in page
     assert ">In progress</span>" in page  # item 4 has no project, so it's still with the agents
-    assert 'action="/backlog/1/delete"' not in page  # still in progress underneath
 
 
 def test_backlog_links_other_reasons_to_the_project_page(ws, client):
@@ -209,14 +212,80 @@ def test_deleting_a_waiting_item_removes_it(ws, client):
     assert "Dark mode" not in client.get("/").text
 
 
-def test_deleting_a_started_item_is_refused(ws, client):
+def test_deleting_a_started_item_without_a_project_folder_removes_the_row(ws, client):
     ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
     ws.backlog_file.write_text(STARTED_AND_WAITING)
     response = client.post("/backlog/1/delete", follow_redirects=False)
     assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    assert [i.number for i in Backlog.load(ws.backlog_file).items] == [2]
+
+
+def test_deleting_a_missing_item_shows_an_error(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    response = client.post("/backlog/9/delete", follow_redirects=False)
     assert response.headers["location"] == "/?error=delete"
     assert ws.backlog_file.read_text() == STARTED_AND_WAITING
-    assert "can't be deleted while it's in progress" in client.get("/?error=delete").text
+    assert "couldn't be deleted" in client.get("/?error=delete").text
+
+
+def test_deleting_a_started_item_deletes_its_project(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    slug = make_status_project(ws, "todo-app")
+    goal = ws.project_dir(slug) / "goal.md"
+    goal.write_text(goal.read_text().replace("- Repo:", "- Backlog item: #1\n- Repo:"))
+    response = client.post("/backlog/1/delete", follow_redirects=False)
+    assert response.headers["location"] == "/"
+    assert not ws.project_dir(slug).exists()
+    assert [i.number for i in Backlog.load(ws.backlog_file).items] == [2]
+
+
+def test_projects_table_has_a_delete_button(ws, client):
+    slug = make_status_project(ws)
+    page = client.get("/").text
+    assert f'action="/projects/{slug}/delete"' in page
+    assert 'aria-label="Delete project ' in page
+
+
+def test_deleting_a_project_from_the_web(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    slug = make_status_project(ws, "todo-app")
+    goal = ws.project_dir(slug) / "goal.md"
+    goal.write_text(goal.read_text().replace("- Repo:", "- Backlog item: #1\n- Repo:"))
+    assert f'action="/projects/{slug}/delete"' in client.get(f"/projects/{slug}").text
+    response = client.post(f"/projects/{slug}/delete", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/#projects"
+    assert not ws.project_dir(slug).exists()
+    assert [i.number for i in Backlog.load(ws.backlog_file).items] == [2]
+    assert "No projects yet" in client.get("/").text
+
+
+def test_deleting_an_unknown_or_sneaky_project_does_nothing(ws, client):
+    slug = make_status_project(ws)
+    (ws.root / "keep.txt").write_text("x")
+    for target in ("nope", "..", "..%2F..", "%2E%2E"):
+        response = client.post(f"/projects/{target}/delete", follow_redirects=False)
+        assert response.status_code in (303, 404, 405)
+    assert ws.project_dir(slug).is_dir()
+    assert (ws.root / "keep.txt").exists()
+
+
+def test_project_delete_confirmation_text_cannot_break_out_of_the_script(ws, client):
+    folder = ws.project_dir("sneaky")
+    folder.mkdir(parents=True)
+    (folder / "tasks.md").write_text("# Tasks: Bob's \"quoted\" </script> idea\n")
+    page = client.get("/").text
+    start = page.index("onsubmit='", page.index('action="/projects/sneaky/delete"')) + len("onsubmit='")
+    handler = page[start:page.index("'", start)]
+    assert handler.startswith("return confirm(\"Delete")
+    assert "</script>" not in handler
+    # A folder with no goal.md is still a project you can delete.
+    client.post("/projects/sneaky/delete")
+    assert not folder.exists()
 
 
 def test_delete_confirmation_text_cannot_break_out_of_the_script(client):

@@ -87,14 +87,12 @@
             {% else %}{{ item.coordinator or "—" }}{% endif %}
           </td>
           <td>
-            {% if item.status == waiting or item.status == done %}
-            {% if item.status == done %}{% set question = "Remove “" ~ item.feature ~ "” from the backlog? Its project and PRs stay." %}
+            {% if item.number in item_projects %}{% set question = "Delete “" ~ item.feature ~ "” and its project? " ~ project_delete_note %}
             {% else %}{% set question = "Delete “" ~ item.feature ~ "” from the backlog?" %}{% endif %}
             <form method="post" action="/backlog/{{ item.number }}/delete" class="inline"
                   onsubmit='return confirm({{ question | tojson }})'>
               <button type="submit" class="secondary small" aria-label="Delete backlog item {{ item.number }}">Delete</button>
             </form>
-            {% endif %}
           </td>
         </tr>
       {% endfor %}
@@ -108,7 +106,7 @@
       <button type="submit">Add to backlog</button>
     </form>
     {% if error == "empty" %}<p class="error">Type a description first.</p>{% endif %}
-    {% if error == "delete" %}<p class="error">That item can't be deleted while it's in progress.</p>{% endif %}
+    {% if error == "delete" %}<p class="error">That item couldn't be deleted. Try again.</p>{% endif %}
   </section>
 
   <section id="projects">
@@ -120,7 +118,7 @@
       <span class="hint">Reads each coordinator's status file. No AI calls, no tokens.{% if status_read %} Just read.{% endif %}</span>
     </form>
     <table>
-      <thead><tr><th>Project</th><th>Stage</th><th>Coordinator</th><th>Tasks merged</th><th>Progress</th><th>Est. cost</th></tr></thead>
+      <thead><tr><th>Project</th><th>Stage</th><th>Coordinator</th><th>Tasks merged</th><th>Progress</th><th>Est. cost</th><th></th></tr></thead>
       <tbody>
       {% for p in projects %}
         <tr>
@@ -134,6 +132,12 @@
             </div>
           </td>
           <td class="num">{{ p.usage.cost_usd | cost }}</td>
+          <td>
+            <form method="post" action="/projects/{{ p.slug }}/delete" class="inline"
+                  onsubmit='return confirm({{ ("Delete “" ~ p.name ~ "”? " ~ project_delete_note) | tojson }})'>
+              <button type="submit" class="secondary small" aria-label="Delete project {{ p.name }}">Delete</button>
+            </form>
+          </td>
         </tr>
       {% endfor %}
       </tbody>
@@ -141,6 +145,7 @@
     <div class="legend">
       {% for s in statuses %}<span><i class="s{{ loop.index0 }}"></i>{{ s.value }}</span>{% endfor %}
     </div>
+    {% if error == "project-delete" %}<p class="error">That project couldn't be deleted. Try again.</p>{% endif %}
     {% else %}
     <p class="empty">No projects yet. Projects appear here once you start a backlog item.</p>
     {% endif %}

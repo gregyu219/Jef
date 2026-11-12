@@ -65,13 +65,20 @@ def test_removing_a_done_item_leaves_the_rest_unchanged(tmp_path):
     assert path.read_text() == BACKLOG
 
 
-@pytest.mark.parametrize("number", [1, 99])
-def test_in_progress_or_missing_items_cannot_be_removed(tmp_path, number):
+def test_in_progress_items_can_be_removed(tmp_path):
     path = tmp_path / "backlog.md"
     path.write_text(WITH_DONE)
     backlog = Backlog.load(path)
-    with pytest.raises(ValueError, match="in progress" if number == 1 else "no backlog item"):
-        backlog.remove(number)
+    assert backlog.remove(1).feature == "To-do list app"
+    assert [i.number for i in backlog.items] == [2, 3]
+
+
+def test_missing_items_cannot_be_removed(tmp_path):
+    path = tmp_path / "backlog.md"
+    path.write_text(WITH_DONE)
+    backlog = Backlog.load(path)
+    with pytest.raises(ValueError, match="no backlog item"):
+        backlog.remove(99)
     assert backlog.render() == WITH_DONE
 
 
