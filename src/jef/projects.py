@@ -173,11 +173,49 @@ def load_project(ws: Workspace, slug: str) -> Project | None:
     return Project(slug, fields.get("name", slug), fields.get("repo", ""), fields.get("coordinator", ""))
 
 
-def first_message(item: BacklogItem, repo: str, coordinator: str) -> str:
-    return (
+def projects_on_repo(ws: Workspace, repo: str, exclude: str = "") -> list[tuple[Project, str]]:
+    """Other Jef projects that use this repo, with their backlog status."""
+    backlog = {f"#{i.number}": i.status.value for i in Backlog.load(ws.backlog_file).items}
+    found = []
+    for slug in ws.project_slugs():
+        if slug == exclude:
+            continue
+        project = load_project(ws, slug)
+        if project and project.repo.lower() == repo.lower():
+            status = backlog.get(goal_fields(ws, slug).get("backlog item", ""), "")
+            found.append((project, status))
+    return found
+
+
+def known_repos(ws: Workspace) -> list[str]:
+    """Every repo a Jef project has used, most recently started first."""
+    dated = []
+    for slug in ws.project_slugs():
+        fields = goal_fields(ws, slug)
+        if fields.get("repo"):
+            dated.append((fields.get("started", ""), fields["repo"]))
+    seen, repos = set(), []
+    for _, repo in sorted(dated, reverse=True):
+        if repo.lower() not in seen:
+            seen.add(repo.lower())
+            repos.append(repo)
+    return repos
+
+
+def first_message(item: BacklogItem, repo: str, coordinator: str, others: list[tuple[Project, str]] = ()) -> str:
+    message = (
         f"Hi {coordinator}. You're the coordinator for a new project.\n\n"
         f"The request: {item.feature}\n"
         f"The repo: {repo} (your working folder is a fresh clone of it)\n\n"
+    )
+    if others:
+        message += (
+            "This repo is already part of other Jef projects. Their work may already be in the "
+            "repo, or still in open PRs, so check for overlap and build on it:\n"
+            + "".join(f"- {p.name} (coordinator {p.coordinator}, {status or 'status unknown'})\n" for p, status in others)
+            + "\n"
+        )
+    return message + (
         "Follow your coordinator instructions: look around the repo, then reply with "
         "what you understand, what in the repo matters, and any questions."
     )
@@ -211,7 +249,7 @@ def start_project(
             slug,
             agent_name(coordinator),
             Role.COORDINATOR,
-            first_message(item, repo, coordinator),
+            first_message(item, repo, coordinator, projects_on_repo(ws, repo, exclude=slug)),
             folder / "repo",
             instructions=skills.load("coordinator"),
         )

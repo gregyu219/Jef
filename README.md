@@ -93,7 +93,8 @@ Agents only reply in text, and Jef reads a few plain markers in those replies:
 | Coordinator | `ACTION: start-research` on its own line, after you say go | Starts the research agent |
 | Research agent | Its whole final reply | Saves it as `research.md`, then asks the coordinator for tasks |
 | Coordinator | A fenced `tasks` block with a numbered list | Writes `tasks.md` for you to approve (a new block replaces it, until you approve) |
-| Implementer | `STATUS: working`, `STATUS: pr-opened <url>` or `STATUS: stuck <reason>` | Updates the task and the agent's note |
+| Implementer | `STATUS: working` or `STATUS: stuck <reason>` | Updates the agent's note |
+| Implementer | A fenced `pr` block (title and description), then `STATUS: ready` | Checks for secrets, pushes the branch and opens the PR (or updates the open one) |
 
 The skills in `skills/` tell each agent how to write these.
 
@@ -107,7 +108,18 @@ Every agent is a named Claude Code session with its own conversation:
 - **Messaging** it later (a heartbeat nudge, a small fix) continues the same session, so it remembers everything so far.
 - **Stopping** an agent also stops every agent it spawned, so stopping a coordinator stops its workers.
 
-Nobody is around to answer permission prompts, so each role gets a fixed list of what it may do, and anything else is refused. No agent may merge a PR or push to `main`, whatever its role. Agents' Claude Code auto memory is switched off, so they keep their notes in Jef's project files, not in your personal memory.
+Nobody is around to answer permission prompts, so each role gets a fixed list of what it may do, and anything else is refused. **No agent can push, open a PR or merge**, whatever its role: implementers only commit, and Jef's own code does the rest.
+
+### Jef opens the PRs
+
+When an implementer reports `STATUS: ready`, Jef:
+
+1. checks it's on its own `jef/...` branch, with everything committed,
+2. runs the **secret check**: it scans every line the agent added, its commit messages and the PR text for things shaped like secrets (Anthropic API keys, GitHub tokens, private keys). If it finds one, it doesn't push, and it tells the agent which file to fix. It never repeats the secret itself,
+3. pushes the branch, only ever the agent's own `jef/...` branch, never `main`, and
+4. opens the PR with your GitHub login, or updates the PR that's already open.
+
+If something needs fixing, Jef tells the agent, up to three times, then marks it stuck for you. The secret check only knows common secret shapes, so it's a safety net, not a guarantee. Agents can also run code (to build and test), so these rules aren't a sandbox. Turn on GitHub branch protection for `main` as the final guard. Agents' Claude Code auto memory is switched off, so they keep their notes in Jef's project files, not in your personal memory.
 
 You're responsible for using Claude Code within [Anthropic's terms](https://www.anthropic.com/legal) for the account you sign in with.
 

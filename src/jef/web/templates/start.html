@@ -12,7 +12,14 @@
     {% endif %}
     <form method="post" action="/backlog/{{ item.number }}/start" class="stack">
       <label for="repo">Which GitHub repo does the code go to?</label>
-      <input type="text" id="repo" name="repo" value="{{ repo }}" placeholder="owner/name, like gregyu219/Jef" autocomplete="off" required>
+      <input type="text" id="repo" name="repo" value="{{ repo }}" placeholder="owner/name, like gregyu219/Jef" autocomplete="off" required list="known-repos">
+      {% if known_repos %}
+      <datalist id="known-repos">{% for r in known_repos %}<option value="{{ r }}">{% endfor %}</datalist>
+      <p class="hint">Repos you've used before: {% for r in known_repos %}<a href="?repo={{ r | urlencode }}">{{ r }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+      {% endif %}
+      {% if others %}
+      <p class="hint">{{ repo }} is already part of {{ others | length }} other project{{ 's' if others | length > 1 else '' }}: {% for p, status in others %}<a href="/projects/{{ p.slug }}">{{ p.name }}</a> ({{ p.coordinator }}{% if status %}, {{ status }}{% endif %}){% if not loop.last %}; {% endif %}{% endfor %}. The new coordinator will be told, so it can build on that work.</p>
+      {% endif %}
       <p class="hint">
         {% if github.ready %}Jef clones it and opens PRs as <strong>{{ github.account }}</strong>, your GitHub CLI login. A human always merges.
         {% else %}<span class="missing">GitHub CLI isn't signed in.</span> Run <code>gh auth login</code> first.{% endif %}

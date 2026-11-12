@@ -20,7 +20,8 @@ Agents only reply in text. Jef reads a few plain markers in those replies:
 
 - the coordinator ends with ``ACTION: start-research`` when you say go,
 - the coordinator puts the task list in a fenced ``tasks`` block,
-- implementers end with ``STATUS: working | pr-opened <url> | stuck <reason>``.
+- implementers end with ``STATUS: working | ready | stuck <reason>``; with ``ready``
+  they include a ``pr`` block, and Jef pushes the branch and opens the PR itself.
 
 Jef writes research.md and tasks.md itself, from those replies.
 """
@@ -47,6 +48,7 @@ from jef.projects import (
     load_project,
     set_goal_field,
 )
+from jef.publish import Publisher, PublishError
 from jef.tasks import Task, TaskList, TaskStatus
 from jef.workspace import Workspace
 
@@ -63,7 +65,9 @@ MAX_CONTEXT_CHARS = 30_000
 ACTION_START_RESEARCH = re.compile(r"^\s*ACTION:\s*start-research\s*$", re.I | re.M)
 TASKS_BLOCK = re.compile(r"```tasks\s*\n(.*?)```", re.S | re.I)
 TASK_LINE = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
-STATUS_LINE = re.compile(r"^\s*STATUS:\s*(working|pr-opened|stuck)\b(.*)$", re.I | re.M)
+STATUS_LINE = re.compile(r"^\s*STATUS:\s*(working|ready|pr-opened|stuck)\b(.*)$", re.I | re.M)
+PR_BLOCK = re.compile(r"```pr\s*\n(.*?)```", re.S | re.I)
+MAX_PUBLISH_ATTEMPTS = 3
 PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 
 
@@ -95,6 +99,18 @@ def parse_tasks(text: str) -> list[str]:
         if match:
             titles.append(match.group(2))
     return titles
+
+
+def parse_pr(text: str) -> tuple[str, str] | None:
+    """(title, body) from the last ```pr block in a reply."""
+    blocks = PR_BLOCK.findall(text)
+    if not blocks:
+        return None
+    lines = blocks[-1].strip().splitlines()
+    title = ""
+    if lines and lines[0].lower().startswith("title:"):
+        title = lines.pop(0)[len("title:"):].strip()
+    return title, "\n".join(lines).strip()
 
 
 def parse_status(text: str) -> tuple[str, str] | None:
@@ -170,6 +186,7 @@ class Pipeline:
     workspace: Workspace
     chats: Chats
     git: Git = field(default_factory=Git)
+    publisher: Publisher = field(default_factory=Publisher)
     pr_state: Callable[[str], str] = gh_pr_state
     now: Callable[[], float] = time.time
     _last_beat: dict[str, float] = field(default_factory=dict)
@@ -297,25 +314,58 @@ class Pipeline:
 
     def _on_implementer_reply(self, slug: str, agent: Agent, text: str) -> None:
         status = parse_status(text)
-        tasks = self.tasks(slug)
-        task = next((t for t in tasks.tasks if t.agent == agent.name), None)
         if status is None:
             agent.note = "Replied without a status line"
             return
         kind, rest = status
-        if kind == "pr-opened":
-            url = PR_URL.search(rest) or PR_URL.search(text)
-            if url and task is not None:
-                task.status = TaskStatus.PENDING_REVIEW
-                task.pr = url.group(0)
-                tasks.save(self.folder(slug) / "tasks.md")
-                agent.note = "PR opened, waiting for your review"
-            else:
-                agent.note = "Said it opened a PR but gave no PR link"
+        if kind in ("ready", "pr-opened"):
+            self._publish(slug, agent, text)
         elif kind == "stuck":
             agent.note = "Stuck: " + _short(rest or "no reason given")
         else:
             agent.note = "Working" + (": " + _short(rest) if rest else "")
+
+    def _publish(self, slug: str, agent: Agent, text: str) -> None:
+        """The implementer says it's done: Jef pushes the branch and opens the PR."""
+        tasks = self.tasks(slug)
+        task = next((t for t in tasks.tasks if t.agent == agent.name), None)
+        if task is None:
+            agent.note = "Said it's ready, but has no task"
+            return
+        pr = parse_pr(text)
+        if pr is None and not task.pr:
+            self._send_back(slug, agent, "There's no ```pr block with the PR title and description. Add one and report ready again.")
+            return
+        title, body = pr if pr else (task.title, "")
+        try:
+            url = self.publisher.publish(
+                Path(agent.folder), self._branch(slug, task), self.git.default_branch(self.folder(slug) / "repo"),
+                title or task.title, body or task.title,
+            )
+        except (PublishError, OSError, subprocess.SubprocessError) as err:
+            self._send_back(slug, agent, str(err))
+            return
+        updated = bool(task.pr)
+        task.status = TaskStatus.PENDING_REVIEW
+        task.pr = url
+        tasks.save(self.folder(slug) / "tasks.md")
+        agent.note = "PR updated, waiting for your review" if updated else "PR opened, waiting for your review"
+
+    def _send_back(self, slug: str, agent: Agent, problem: str) -> None:
+        """Tell the implementer what to fix, a few times at most."""
+        match = re.match(r"Couldn't open the PR \((\d+)\)", agent.note)
+        attempt = int(match.group(1)) + 1 if match else 1
+        if attempt > MAX_PUBLISH_ATTEMPTS:
+            agent.note = "Stuck: Jef couldn't open the PR after several tries: " + _short(problem)
+            return
+        agent.note = f"Couldn't open the PR ({attempt}): " + _short(problem)
+        try:
+            self.chats.send(slug, agent.name, f"Jef couldn't open your PR yet: {problem}", sender="jef")
+        except ChatError:
+            pass
+
+    def _branch(self, slug: str, task: Task) -> str:
+        return f"jef/{slug}/task-{task.number}"
 
     def _ask_for_tasks(self, slug: str) -> None:
         if goal_fields(self.workspace, slug).get("planning requested", "").lower() == "yes":
@@ -359,7 +409,7 @@ class Pipeline:
         name = f"impl-{task.number}"
         repo = self.folder(slug) / "repo"
         base = self.git.default_branch(repo)
-        branch = f"jef/{slug}/task-{task.number}"
+        branch = self._branch(slug, task)
         work = self.folder(slug) / "work" / name
         if not work.exists():
             self.git.new_worktree(repo, work, branch, base)
@@ -466,16 +516,17 @@ class Pipeline:
             "## All tasks, so you know what's yours and what isn't\n\n"
             + "\n".join(f"{t.number}. {t.title}" for t in self.tasks(slug).tasks)
             + "\n\n"
-            f"When it's done and tested, push `{branch}` and open the PR with "
-            f"`gh pr create --base {base}`. Follow your implementer instructions, and end every "
-            "reply with one STATUS line."
+            "When it's done and tested, commit it and report `STATUS: ready` with a ```pr block. "
+            "Don't push or open the PR yourself: Jef checks your commits for secrets, pushes your "
+            "branch and opens the PR. Follow your implementer instructions, and end every reply "
+            "with one STATUS line."
         )
 
     def _nudge_message(self, task: Task) -> str:
         return (
             f"Heartbeat check-in for task {task.number}: {task.title}.\n"
-            "Carry on from where you left off. If the PR is already open, reply with "
-            "`STATUS: pr-opened <PR URL>`. End your reply with one STATUS line."
+            "Carry on from where you left off. When everything is committed and tested, report "
+            "`STATUS: ready` with a ```pr block. End your reply with one STATUS line."
         )
 
 
