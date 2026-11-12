@@ -57,8 +57,22 @@
     input[type=password] { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
     button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
     pre.help { white-space: pre-wrap; font-size: 13px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+    form.stack { flex-direction: column; align-items: stretch; }
+    form.stack label { font-weight: 600; }
+    form.stack label.check { font-weight: 400; display: flex; gap: 8px; align-items: center; }
+    a.cancel { color: var(--muted); margin-left: 12px; }
+    a.start { font-weight: 600; color: var(--accent); }
+    .pill.idle { color: var(--done); } .pill.working { color: var(--progress); } .pill.stopped { color: var(--waiting); }
+    ol.chat { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+    ol.chat li { padding: 8px 12px; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    ol.chat li.sent { background: color-mix(in srgb, var(--accent) 12%, transparent); align-self: flex-end; max-width: 85%; }
+    ol.chat li.text { background: var(--bg); border: 1px solid var(--border); }
+    ol.chat li.tool { color: var(--muted); font: 12px ui-monospace, monospace; padding: 2px 12px; }
+    ol.chat li.result { color: var(--muted); font-size: 12px; padding: 0 12px; }
+    ol.chat li.error { color: #dc2626; }
     .notice { color: var(--done); font-size: 14px; margin: 8px 0 0; }
   </style>
+{% block head %}{% endblock %}
 </head>
 <body>
 <main>
