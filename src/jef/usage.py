@@ -13,6 +13,12 @@ goal.md. ``budget_left`` is what Jef checks before starting any turn.
 Claude Code also writes ``rate_limit_event`` lines into the same logs: how
 much of your plan's 5-hour and weekly limits you've used. ``latest_plan_usage``
 reads the newest one, so the home page can show it without any extra call.
+
+There can also be an overall spending limit across all projects, per day or
+per month: a ``- Spending limit: 50.00 USD per day`` line in Jef's
+settings.md. ``limit_left`` is checked before every turn too. To know which
+day a turn belongs to, Jef dates each message it sends (``jef_sent``'s
+``at``), and a turn counts on the day it started.
 """
 
 from __future__ import annotations
@@ -80,18 +86,37 @@ def usage_from_event(event: dict) -> Usage:
     )
 
 
-def agent_usage(chat_file: Path) -> Usage:
-    """Everything one agent has used, added up from its chat log."""
+def _sent_at(event: dict) -> datetime | None:
+    """When Jef sent a message, from a ``jef_sent`` event's ``at``."""
+    try:
+        when = datetime.fromisoformat(str(event.get("at") or ""))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.astimezone()  # no zone: local time
+
+
+def agent_usage(chat_file: Path, since: datetime | None = None) -> Usage:
+    """Everything one agent has used, added up from its chat log.
+
+    With ``since``, only turns that started then or later: a turn counts at
+    the time Jef sent its message. Turns from before Jef dated its messages
+    have no date, so they're left out."""
     total = Usage()
     if not chat_file.exists():
         return total
+    started: datetime | None = None
     for raw in chat_file.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             event = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        if isinstance(event, dict) and event.get("type") == "result":
-            total += usage_from_event(event)
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "jef_sent":
+            started = _sent_at(event)
+        elif event.get("type") == "result":
+            if since is None or (started is not None and started >= since):
+                total += usage_from_event(event)
     return total
 
 
@@ -244,6 +269,95 @@ def latest_plan_usage(ws: Workspace) -> PlanUsage | None:
         if windows:
             return PlanUsage(windows, datetime.fromtimestamp(mtime, tz=timezone.utc))
     return None
+
+
+PERIODS = ("day", "month")
+
+
+@dataclass(frozen=True)
+class SpendingLimit:
+    """At most ``amount_usd`` across all projects each day or each month."""
+
+    amount_usd: float
+    period: str  # "day" or "month"
+
+    def __str__(self) -> str:
+        return f"{self.amount_usd:.2f} USD per {self.period}"
+
+    @property
+    def when(self) -> str:
+        return "today" if self.period == "day" else "this month"
+
+
+def parse_limit(value: str) -> SpendingLimit | None:
+    """A settings.md ``Spending limit`` value like "50.00 USD per day", or
+    None for "none", empty or nonsense."""
+    amount, sep, period = value.strip().lower().partition(" per ")
+    if not sep or period.strip() not in PERIODS:
+        return None
+    usd = parse_budget(amount)
+    return SpendingLimit(usd, period.strip()) if usd is not None else None
+
+
+def _settings_fields(ws: Workspace) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    if not ws.settings_file.exists():
+        return fields
+    for line in ws.settings_file.read_text(encoding="utf-8").splitlines():
+        if line.startswith("- ") and ":" in line:
+            key, value = line[2:].split(":", 1)
+            fields[key.strip().lower()] = value.strip()
+    return fields
+
+
+def spending_limit(ws: Workspace) -> SpendingLimit | None:
+    """The overall limit from settings.md, or None if there's none."""
+    return parse_limit(_settings_fields(ws).get("spending limit", ""))
+
+
+def set_spending_limit(ws: Workspace, limit: SpendingLimit | None) -> None:
+    """Write the overall limit (or "none") into settings.md, keeping any
+    other lines there."""
+    new = f"- Spending limit: {limit if limit else 'none'}"
+    path = ws.settings_file
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else ["# Jef settings", ""]
+    for i, line in enumerate(lines):
+        if line.startswith("- ") and line[2:].split(":", 1)[0].strip().lower() == "spending limit":
+            lines[i] = new
+            break
+    else:
+        lines.append(new)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def period_start(period: str, now: datetime | None = None) -> datetime:
+    """Local midnight at the start of today, or of the 1st of this month."""
+    local = (now or datetime.now()).astimezone().replace(tzinfo=None)
+    start = local.replace(day=1 if period == "month" else local.day, hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone()  # its own UTC offset, in case daylight saving changed since
+
+
+def spent_since(ws: Workspace, since: datetime) -> float:
+    """Estimated dollars spent across all projects on turns started since then."""
+    return sum(
+        agent_usage(path, since).cost_usd
+        for slug in ws.project_slugs()
+        for path in sorted((ws.project_dir(slug) / "chats").glob("*.jsonl"))
+    )
+
+
+def limit_spent(ws: Workspace, limit: SpendingLimit, now: datetime | None = None) -> float:
+    return spent_since(ws, period_start(limit.period, now))
+
+
+def limit_left(ws: Workspace, now: datetime | None = None) -> float | None:
+    """Dollars left under the overall limit this day or month (0 or less once
+    it's used up), or None if there's no limit."""
+    limit = spending_limit(ws)
+    if limit is None:
+        return None
+    return limit.amount_usd - limit_spent(ws, limit, now)
 
 
 def format_tokens(count: int) -> str:

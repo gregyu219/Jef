@@ -12,7 +12,7 @@ from jef.publish import PublishError
 from jef.projects import goal_fields, slugify, start_project
 from jef.status import read_status, status_path
 from jef.tasks import TaskStatus
-from jef.usage import budget_left
+from jef.usage import SpendingLimit, budget_left, limit_left
 from jef.web.app import ago, create_app
 from jef.workspace import Workspace
 
@@ -83,7 +83,8 @@ class World:
         self.pr_states = {}
         self.mergeable = {}
         self.clock = 1_000_000.0
-        self.chats = Chats(self.ws, "/bin/claude", popen=self.popen, budget_left=lambda slug: budget_left(self.ws, slug))
+        self.chats = Chats(self.ws, "/bin/claude", popen=self.popen, budget_left=lambda slug: budget_left(self.ws, slug),
+                           limit_left=lambda: limit_left(self.ws))
         self.git = FakeGit()
         self.publisher = FakePublisher()
         self.pipeline = Pipeline(self.ws, self.chats, git=self.git, publisher=self.publisher, pr_state=lambda url: self.pr_states.get(url, "OPEN"),
@@ -346,8 +347,81 @@ def test_a_turn_cut_off_by_the_budget_says_so(w):
     # The reply is read once the budget is raised; it says why the turn stopped.
     w.pipeline.set_budget_usd(w.slug, 10)
     w.pipeline.tick(w.slug)
-    assert w.agent("impl-1").note == "Last turn stopped partway: it reached the project budget"
+    assert w.agent("impl-1").note == "Last turn stopped partway: it reached the budget or spending limit"
     assert any("project's budget" in line.text for line in w.chats.transcript(w.slug, "impl-1"))
+
+
+def date_turns_back(w):
+    """Pretend every turn so far started long ago, as if the day had passed."""
+    for log in (w.ws.project_dir(w.slug) / "chats").glob("*.jsonl"):
+        lines = [json.loads(line) for line in log.read_text().splitlines()]
+        for event in lines:
+            if event.get("type") == "jef_sent":
+                event["at"] = "2000-01-01T00:00:00+00:00"
+        log.write_text("".join(json.dumps(e) + "\n" for e in lines))
+
+
+def test_the_overall_limit_pauses_every_project_until_the_day_is_over(w):
+    p, slug = w.pipeline, w.slug
+    assert p.spending_limit() is None
+    p.set_spending_limit(SpendingLimit(2, "day"))
+    assert "- Spending limit: 2.00 USD per day" in w.ws.settings_file.read_text()
+    p.start_research(slug)
+    assert flag(w.procs["research"][0].cmd, "--max-budget-usd") == "2.00"
+    w.reply("ada", "hi", cost=0.5)
+    # The cap passed to Claude Code is the smaller of the budget and the limit.
+    p.set_budget_usd(slug, 10)
+    assert w.chats._check_budget(slug) == 1.5  # $1.50 left today, $9.50 in the budget
+    p.set_budget_usd(slug, 1)
+    assert w.chats._check_budget(slug) == 0.5
+    p.set_budget_usd(slug, None)
+
+    w.reply("research", "findings", cost=1.75)  # $2.25 of $2.00 today
+    assert p.problem(slug).startswith("Spending limit reached: $2.25 of $2.00 used today across all projects")
+    assert not (w.ws.project_dir(slug) / "research.md").exists()
+    with pytest.raises(ChatError, match="spending limit is used up"):
+        w.chats.send(slug, "ada", "hello?")
+    p.clear_problem(slug)
+    assert p.problem(slug).startswith("Spending limit reached")
+
+    # A new day: the heartbeat lifts the pause by itself and carries on.
+    date_turns_back(w)
+    p.tick(slug)
+    assert p.problem(slug) == ""
+    assert (w.ws.project_dir(slug) / "research.md").exists()
+
+    # Raising or clearing the limit lifts it straight away too.
+    w.reply("ada", "```tasks\n1. Show the version\n```", cost=3)
+    assert p.problem(slug).startswith("Spending limit reached")
+    p.set_spending_limit(SpendingLimit(100, "month"))
+    assert p.problem(slug) == ""
+    p.set_spending_limit(None)
+    assert p.spending_limit() is None
+    for bad in (SpendingLimit(0, "day"), SpendingLimit(float("nan"), "day"), SpendingLimit(5, "week")):
+        with pytest.raises(PipelineError):
+            p.set_spending_limit(bad)
+
+
+def test_web_spending_limit_form(w):
+    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
+                     chats=w.chats, pipeline=w.pipeline)
+    c = TestClient(app)
+    assert "No limit" in c.get("/settings").text
+    page = c.post("/settings/spending-limit", data={"amount": "$3", "period": "month"}).text
+    assert "Saved." in page and w.pipeline.spending_limit() == SpendingLimit(3, "month")
+    w.reply("ada", "hi", cost=1.25)
+    page = c.get("/settings").text
+    assert "Limit $3.00 per month · $1.25 used this month · $1.75 left" in page and 'value="3.00"' in page
+    assert "$1.25 of $3.00 used this month" in c.get(f"/projects/{w.slug}").text
+    assert "Type a dollar amount" in c.post("/settings/spending-limit", data={"amount": "lots"}).text
+    assert "per day or per month" in c.post("/settings/spending-limit", data={"amount": "5", "period": "year"}).text
+
+    # Used up: the project pauses, and messages to the coordinator say why.
+    c.post("/settings/spending-limit", data={"amount": "1", "period": "day"})
+    page = c.post(f"/projects/{w.slug}/message", data={"message": "hello"}).text
+    assert "overall spending limit is used up" in page and "Spending limit reached" in page
+    c.post("/settings/spending-limit", data={"amount": ""})
+    assert w.pipeline.spending_limit() is None and w.pipeline.problem(w.slug) == ""
 
 
 def test_web_buttons(w):

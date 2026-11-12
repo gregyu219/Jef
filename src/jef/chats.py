@@ -6,8 +6,9 @@ is a named Claude Code session with its own conversation:
 - **Spawn** starts a new session with a fixed session ID and a first message.
 - **Send** resumes that same session with another message, so the agent
   remembers everything so far. Heartbeats and "small fix" requests use this.
-- No turn starts once the project's dollar budget is used up, and each turn
-  is capped at what's left with Claude Code's ``--max-budget-usd``.
+- No turn starts once the project's dollar budget, or Jef's overall daily or
+  monthly spending limit, is used up, and each turn is capped at what's left
+  with Claude Code's ``--max-budget-usd``.
 - **Stop** ends an agent. Stopping an agent also stops every agent it spawned,
   so closing a coordinator closes its workers.
 
@@ -28,6 +29,7 @@ import subprocess
 import threading
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Callable
@@ -146,6 +148,10 @@ class ChatError(RuntimeError):
 
 
 BUDGET_USED_UP = "This project's budget is used up. Raise the budget on the project page to keep going."
+LIMIT_USED_UP = (
+    "Jef's overall spending limit is used up for now. It starts again with the next day or month, "
+    "or raise it in Settings."
+)
 
 
 def _roster_path(ws: Workspace, project: str) -> Path:
@@ -203,6 +209,9 @@ class Chats:
     # Dollars left in a project's budget, or None for no budget. Passed in
     # (see ``usage.budget_left``) so this module doesn't import the projects code.
     budget_left: Callable[[str], float | None] = lambda project: None
+    # Dollars left under the overall daily or monthly limit, or None for no
+    # limit (see ``usage.limit_left``).
+    limit_left: Callable[[], float | None] = lambda: None
     _running: dict[tuple[str, str], subprocess.Popen] = field(default_factory=dict)
     # The web pages and the heartbeat both change agents.md; one at a time.
     lock: threading.RLock = field(default_factory=threading.RLock)
@@ -221,11 +230,16 @@ class Chats:
     # ---- commands
 
     def _check_budget(self, project: str) -> float | None:
-        """Refuse to start a turn once the budget is used up. Returns what's left."""
+        """Refuse to start a turn once the project's budget or the overall
+        limit is used up. Returns the smaller of what's left, or None."""
         left = self.budget_left(project)
         if left is not None and left <= 0:
             raise ChatError(BUDGET_USED_UP)
-        return left
+        overall = self.limit_left()
+        if overall is not None and overall <= 0:
+            raise ChatError(LIMIT_USED_UP)
+        lefts = [x for x in (left, overall) if x is not None]
+        return min(lefts) if lefts else None
 
     def command(
         self, agent: Agent, project: str, first_turn: bool, instructions: str = "", budget_left: float | None = None
@@ -262,7 +276,9 @@ class Chats:
         log = self.chat_file(project, agent.name)
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as out:
-            out.write(json.dumps({"type": "jef_sent", "from": sender, "text": message}) + "\n")
+            # Dated, so the overall daily or monthly limit knows when the turn started.
+            at = datetime.now().astimezone().isoformat(timespec="seconds")
+            out.write(json.dumps({"type": "jef_sent", "from": sender, "text": message, "at": at}) + "\n")
         # The message goes in on stdin (from a file, so a long one can't block).
         prompt_file = log.with_suffix(".prompt")
         prompt_file.write_text(message, encoding="utf-8")
@@ -440,7 +456,7 @@ def _describe(event: dict) -> list[ChatLine]:
     if kind == "result":
         if event.get("is_error"):
             if "budget" in str(event.get("subtype") or ""):
-                return [ChatLine("error", "Stopped partway: this turn used up the rest of the project's budget.")]
+                return [ChatLine("error", "Stopped partway: this turn used up the rest of the project's budget or Jef's spending limit.")]
             return [ChatLine("error", str(event.get("result") or event.get("subtype") or "The turn failed."))]
         return [ChatLine("result", "Turn finished.")]
     return []

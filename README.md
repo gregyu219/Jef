@@ -146,6 +146,12 @@ Each project can have a dollar budget, set under Usage on its project page (it's
 
 Spending can still go a little over: a turn's cost is only known once it's finished, and Claude Code stops a turn a bit after it reaches its cap.
 
+### Overall spending limit
+
+On top of project budgets, you can set one limit across all projects, per day or per month, under Spending limit on the Settings page (it's saved as a `- Spending limit: 50.00 USD per day` line in `settings.md` in Jef's folder). There's no limit unless you set one. Once the estimated cost of turns started today (or this month) reaches it, every project pauses the same way as for a budget, and each turn's `--max-budget-usd` is the smaller of what's left in the budget and under the limit. When the next day or month starts, the heartbeat lifts the pause by itself; raising or clearing the limit lifts it straight away.
+
+Days and months follow your computer's clock, and a turn counts on the day it started. Jef dates each message it sends to an agent so it can tell; turns from before Jef did that aren't counted toward any day or month. The home page's chat with Jef isn't counted or limited.
+
 You're responsible for using Claude Code within [Anthropic's terms](https://www.anthropic.com/legal) for the account you sign in with.
 
 ## Where Jef keeps things

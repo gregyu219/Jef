@@ -20,6 +20,26 @@
   </section>
 
   <section>
+    <h2>Spending limit</h2>
+    <p class="hint">An optional cap across all projects, per day or per month, on top of each project's own budget. Once the estimated cost of turns started in the current day or month reaches it, every project pauses until the next day or month starts, or until you raise it.</p>
+    {% if limit %}
+    <p class="usage">Limit {{ limit.amount_usd | cost }} per {{ limit.period }} · {{ limit_spent | cost }} used {{ limit.when }} · {{ [limit.amount_usd - limit_spent, 0] | max | cost }} left</p>
+    {% else %}
+    <p class="hint">No limit: only project budgets apply.</p>
+    {% endif %}
+    <form method="post" action="/settings/spending-limit">
+      <label>Limit $<input type="number" name="amount" value="{{ '%.2f' | format(limit.amount_usd) if limit else '' }}" min="0.01" step="0.01" class="minutes" placeholder="none" aria-label="Spending limit in dollars"></label>
+      <label>per <select name="period" aria-label="Limit period">
+        {% for p in periods %}<option value="{{ p }}"{% if limit and limit.period == p %} selected{% endif %}>{{ p }}</option>{% endfor %}
+      </select></label>
+      <button type="submit" class="secondary">Save</button>
+    </form>
+    <p class="hint">Leave it empty for no limit. Days and months follow this computer's clock; a turn counts on the day it started.</p>
+    {% if notice == "limit" %}<p class="notice">Saved.</p>{% endif %}
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  </section>
+
+  <section>
     <h2>GitHub</h2>
     <p class="hint">For now, Jef commits and opens PRs with your own GitHub CLI login. Jef never reads or stores the token; it only asks <code>gh</code> which account is signed in.</p>
     {% if github.ready %}

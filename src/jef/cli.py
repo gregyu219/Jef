@@ -74,11 +74,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     from jef import jefchat
     from jef.chats import Chats
     from jef.pipeline import Heartbeat, Pipeline
-    from jef.usage import budget_left
+    from jef.usage import budget_left, limit_left
     from jef.workspace import Workspace
 
     ws = Workspace.default()
-    chats = Chats(ws, status.path, budget_left=lambda slug: budget_left(ws, slug))
+    chats = Chats(ws, status.path, budget_left=lambda slug: budget_left(ws, slug), limit_left=lambda: limit_left(ws))
     jef_chats = jefchat.make_chats(ws, status.path)
     pipeline = Pipeline(ws, chats)
     heartbeat = Heartbeat(pipeline)
