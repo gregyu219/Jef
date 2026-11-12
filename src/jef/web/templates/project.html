@@ -18,25 +18,31 @@
     </div>
     {% endif %}
     {% if phase == phases.UNDERSTANDING %}
-    <p class="next">Next: when you're happy {{ project.coordinator }} understands, tell {{ project.coordinator }} "go", or press the button. A research agent will study the repo.</p>
+    <p class="next">Next: when you're happy {{ project.coordinator }} understands, tell {{ project.coordinator }} "go", or press the button. {{ project.coordinator }} then starts a research agent to study the repo.</p>
     <form method="post" action="/projects/{{ project.slug }}/research"><button type="submit">Start research</button></form>
     {% elif phase == phases.RESEARCH %}
     <p class="next">The research agent is studying the repo. Its findings become research.md.</p>
     {% elif phase == phases.PLANNING %}
-    <p class="next">{{ project.coordinator }} is turning the research into tasks.</p>
+    <p class="next">{{ project.coordinator }} is turning the research into tasks. Jef woke {{ project.coordinator }} when the research finished.</p>
     {% elif phase == phases.APPROVAL %}
-    <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them.{% if coordinator_decides %} If you don't, {{ project.coordinator }} will decide at the next heartbeat (every {{ heartbeat }} minutes).{% else %} {{ project.coordinator }} won't approve them for you: that's turned off under Heartbeat below.{% endif %} Each task becomes one PR, {{ at_once }} at a time: the next starts after you merge the last{% if coordinator_starts %} and {{ project.coordinator }} says it should{% endif %}.</p>
+    <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them.{% if coordinator_decides %} If you haven't after one heartbeat (every {{ heartbeat }} minutes), {{ project.coordinator }} may decide.{% else %} {{ project.coordinator }} won't approve them for you: that's turned off under Heartbeat below.{% endif %} Each task becomes one PR, {{ at_once }} at a time: {{ project.coordinator }} starts the next after you merge the last.</p>
     <form method="post" action="/projects/{{ project.slug }}/approve"><button type="submit">Approve tasks and start building</button></form>
     {% elif phase == phases.BUILDING %}
-    <p class="next">Implementers are building. Review and merge each PR on GitHub. Jef notices merges within five minutes, or straight away if you press Check status now.{% if coordinator_starts %} Then {{ project.coordinator }} looks at what merged and decides when the next task starts, and can revise the tasks that are left.{% else %} Then Jef starts the next task.{% endif %} The agents list shows who started each implementer.</p>
+    <p class="next">{{ project.coordinator }} is running the build: starting each task, nudging its implementer, having Jef open the PR, and checking it on GitHub for merges and conflicts. Review and merge each PR on GitHub; {{ project.coordinator }} notices at the next heartbeat, then starts the next task.</p>
     {% elif phase == phases.DONE %}
     <p class="next">Every task is merged. This project is done.</p>
     {% endif %}
     {% if phase not in [phases.DONE, phases.STOPPED] %}
     <form method="post" action="/projects/{{ project.slug }}/check" class="check">
       <button type="submit" class="secondary">Check status now</button>
-      <span class="hint">Reads agents' replies and asks GitHub about PRs straight away. Doesn't nudge agents, so it costs no tokens.{% if last_checked %} Last checked {{ last_checked }}.{% endif %}</span>
+      <span class="hint">Re-reads the project's files straight away. Costs no tokens.{% if last_checked %} Last checked {{ last_checked }}.{% endif %}</span>
     </form>
+    {% if coordinator and coordinator.status.value == "Idle" and phase != phases.UNDERSTANDING %}
+    <form method="post" action="/projects/{{ project.slug }}/wake" class="check">
+      <button type="submit" class="secondary">Ask {{ project.coordinator }} to check now</button>
+      <span class="hint">A heartbeat straight away: {{ project.coordinator }} looks at the agents and PRs and acts. Costs one turn.</span>
+    </form>
+    {% endif %}
     {% endif %}
     {% endif %}
     {% if error and error not in ["empty", "busy", "stopped", "claude", "budget"] %}<p class="error">{{ error }}</p>{% endif %}
@@ -141,20 +147,15 @@
 
   <section>
     <h2>Heartbeat</h2>
-    <p class="hint">How often Jef checks in on implementers that are still working.</p>
+    <p class="hint">How often Jef wakes {{ project.coordinator }} to check on the project: nudge implementers, look at PRs, start the next task. Jef also wakes {{ project.coordinator }} straight away when one of its agents finishes a turn.</p>
     <form method="post" action="/projects/{{ project.slug }}/heartbeat">
       <label>Every <input type="number" name="minutes" value="{{ heartbeat }}" min="5" max="1440" class="minutes"> minutes</label>
       <button type="submit" class="secondary">Save</button>
     </form>
-    <p class="hint">{% if coordinator_decides %}If a task list waits a whole heartbeat without your approval, {{ project.coordinator }} decides: approves it or revises it.{% else %}{{ project.coordinator }} doesn't approve task lists at the heartbeat. Only you do, with the button.{% endif %}</p>
+    <p class="hint">{% if coordinator_decides %}If a task list waits a whole heartbeat without your approval, {{ project.coordinator }} may approve it or revise it.{% else %}{{ project.coordinator }} can't approve task lists. Only you do, with the button.{% endif %}</p>
     <form method="post" action="/projects/{{ project.slug }}/coordinator-decides">
       <input type="hidden" name="on" value="{{ 'no' if coordinator_decides else 'yes' }}">
       <button type="submit" class="secondary">{{ "Turn off" if coordinator_decides else "Turn on" }} {{ project.coordinator }}'s heartbeat approval</button>
-    </form>
-    <p class="hint">{% if coordinator_starts %}After each merge, {{ project.coordinator }} decides when the next task starts. If {{ project.coordinator }} hasn't decided within two heartbeats, Jef stops and asks you.{% else %}After each merge, Jef starts the next task straight away, without asking {{ project.coordinator }}.{% endif %}</p>
-    <form method="post" action="/projects/{{ project.slug }}/coordinator-starts">
-      <input type="hidden" name="on" value="{{ 'no' if coordinator_starts else 'yes' }}">
-      <button type="submit" class="secondary">{{ "Turn off" if coordinator_starts else "Turn on" }} {{ project.coordinator }} starting the next task</button>
     </form>
   </section>
 {% endblock %}

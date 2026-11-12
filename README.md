@@ -42,7 +42,7 @@ Options for `start` and `run`: `--port 9000` to use another port, `--no-browser`
 
 ### Running all the time
 
-Coordinators heartbeat every hour, so Jef needs to stay running. `jef start` handles that: it runs Jef inside a background [tmux](https://github.com/tmux/tmux) session named `jef`, wrapped in `caffeinate -is` so your Mac doesn't fall asleep while it's plugged in.
+Jef wakes each coordinator on its heartbeat (every hour by default), so Jef needs to stay running. `jef start` handles that: it runs Jef inside a background [tmux](https://github.com/tmux/tmux) session named `jef`, wrapped in `caffeinate -is` so your Mac doesn't fall asleep while it's plugged in.
 
 Things it can't help with:
 
@@ -56,7 +56,7 @@ Jef has four levels. Each one hands work to the level below it and keeps track o
 | Level | You talk to it about | It spins up | It keeps track of |
 | --- | --- | --- | --- |
 | **Jef** (the main UI) | Features you want, and when to start them | One coordinator per project, only after you confirm | Your backlog, plus each project's coordinator, GitHub repo and progress |
-| **Project coordinator** | Requirements, and PRs that miss the point | One research agent per project, then one implementation agent per task | `goal.md`, `tasks.md` and each task's status |
+| **Project coordinator** | Requirements, and PRs that miss the point | One research agent per project, then one implementation agent per task, through `jef project` commands | `goal.md`, `tasks.md`, each task's status, its implementers and their PRs |
 | **Research agent** | Nothing directly; it reports to its coordinator | Nobody | The project's findings and proposed approach |
 | **Implementation agent** | Nothing directly; it reports to its coordinator | Nobody | Its branch, its code changes and its PR |
 
@@ -64,8 +64,8 @@ Jef has four levels. Each one hands work to the level below it and keeps track o
 
 1. **Tell Jef what you want.** Jef adds it to your backlog as *Waiting*. Nothing starts until you confirm, because every running project spends tokens.
 2. **Confirm and connect GitHub.** Jef asks which GitHub repo the code goes to and which account commits it, then creates a named project coordinator.
-3. **Research.** The coordinator runs one research agent, which writes `research.md`. The coordinator turns that into `tasks.md` for you to approve. If you haven't approved it by the next heartbeat, the coordinator decides: it approves the list or revises it. You can turn that off per project.
-4. **Build.** Implementation agents build one task at a time, and Jef heartbeats each one until it opens a PR. The first starts when you approve the list. After each merge, the coordinator looks at what merged and decides when the next task starts (`ACTION: start-task <n>`), revising the tasks that are left if needed, or waits for you (`ACTION: wait <reason>`). You can turn this off per project; then Jef starts the next task straight away. The project page shows who started each agent.
+3. **Research.** When you say go, the coordinator starts one research agent, which writes `research.md`. The coordinator turns that into `tasks.md` for you to approve. If you haven't approved it after a whole heartbeat, the coordinator may approve or revise it. You can turn that off per project.
+4. **Build.** The coordinator starts one implementation agent per task, one at a time. It reads each implementer's replies, nudges it on its heartbeat, has Jef open the PR when it's ready, and checks the PR on GitHub. After a merge it starts the next task, revising the ones that are left if what merged changed the picture. If a PR gets merge conflicts, it has the implementer rebase, and Jef pushes the fix to the same PR. The project page shows who started each agent.
 5. **Review.** You review each PR on GitHub and merge it. If one misses the point, chat with its coordinator by name and it will revise the work or start over.
 
 ### Task statuses
@@ -76,32 +76,55 @@ Every task in a project's status table is in one of five states:
 
 *Research* only appears when the coordinator sends extra research for a single task. Most tasks go straight from Not started to Implementation.
 
+### Who does what
+
+**The coordinator runs its project; Jef only keeps time and keeps the rules.**
+
+A coordinator acts with `jef project` commands, which only work inside a coordinator's turn (Jef sets `JEF_PROJECT` and `JEF_AGENT` for coordinators and nobody else, and only coordinators may run `jef`):
+
+| Command | What it does |
+| --- | --- |
+| `jef project status` | The project at a glance (reads the files) |
+| `jef project read impl-2` | An agent's latest reply (reads the chat) |
+| `jef project research ["brief"]` | Starts the research agent |
+| `jef project plan "Task" "Task" …` | Sets the task list. While building, it replaces only the tasks that haven't started |
+| `jef project approve` | Approves the list, only after it has waited a heartbeat for you and only if that's allowed for the project |
+| `jef project start N` | Starts task N's implementer, if no other task is still unmerged |
+| `jef project send impl-2 "…"` | Messages one of its own agents |
+| `jef project publish N [--note …]` | Jef checks the commits for secrets, pushes the branch and opens the PR, or updates the open one (with the note as a comment) |
+| `jef project prs` | Asks GitHub about every PR: merged (recorded, implementer stopped), conflicts, closed |
+| `jef project wait "…"` | Shows you on the project page that it's waiting for you |
+| `jef project stop impl-2` | Stops one of its own agents |
+
+The reading commands work on their own. The others drop a request in the project's `requests/` folder; the running Jef carries it out within a few seconds and prints the answer. So Jef is the only thing that writes the project's files, starts agents and pushes code, and its rules hold whatever a coordinator asks: one task at a time, only its own agents, no secrets pushed, never `main`, never a merge.
+
 ### Heartbeats
 
-Jef's heartbeat runs in the background while Jef is running. Every few seconds it acts on replies agents have finished: it saves research, records the task list, and notes PRs and stuck agents. It also starts the next task's implementer when it's that task's turn.
+A coordinator can't wake itself: each agent is a Claude Code session that only runs while it answers a message. So Jef keeps time. It wakes a coordinator:
 
-Once per heartbeat interval (an hour by default; change it on the project page), it nudges implementers that are still working. While a task list waits for your approval, it asks the coordinator to decide once per interval, starting one full interval after the list was proposed: the coordinator either approves the list or sends a revised one (which restarts the wait). You can still approve by hand at any time. To approve every list yourself, turn the coordinator's heartbeat approval off on the project page (it's on by default, and saved as `Coordinator decides: no` in `goal.md`); while it's off, the coordinator isn't asked and Jef ignores its `ACTION: approve-tasks`. It checks GitHub for merged PRs every five minutes. After a merge it asks the coordinator which task starts next; if the coordinator hasn't said by the next heartbeat, Jef reminds it once, and a heartbeat after that it stops and shows you a problem instead of starting anything on its own. To have Jef start the next task without asking, turn off the coordinator starting the next task on the project page (saved as `Coordinator starts tasks: no` in `goal.md`). Each PR check also asks GitHub whether open PRs can still merge. If one has conflicts, the coordinator decides: the implementer rebases it on `main` and Jef pushes the fix to the same PR with a comment saying why (`ACTION: fix-conflict <n>`), or it waits for you (`ACTION: wait <reason>`). With the setting off, Jef sends the fix straight to the implementer. A merge in any project makes every project check its PRs at its next tick, since projects can share a repo. Jef only opens a new PR for a task if its old one was closed, and links the old one.
+- **on its heartbeat**, once per interval (an hour by default; change it on the project page), while it's planning, waiting for approval (if it may approve) or building, and nothing is waiting for you,
+- **straight away when one of its agents finishes a turn**, so it can read the reply and act,
+- when you press **Approve**, **Start research**, **Try again** or **Ask the coordinator to check now**.
 
-Don't want to wait? The project page has a **Check status now** button that does the same checks straight away: it reads finished replies, asks GitHub about PRs waiting for review, and starts the next task. It doesn't nudge agents, so it costs no tokens.
+Each wake-up says what changed and includes the project's status. On its heartbeat the coordinator nudges implementers that are still working, runs `jef project prs` to check merges and conflicts, and starts the next task when the last one has merged. Heartbeats cost a coordinator turn each, so don't set the interval too short.
+
+Besides that, Jef only reads files: every half minute it saves finished research as `research.md` and updates each project's `status.md`. That costs nothing. **Check status now** on the project page does the same straight away.
 
 To see every project at once, press **Read status** above the Projects table on the home page. It rewrites each project's `status.md` from Jef's own files and shows each project's stage and its coordinator's state. It makes no AI or GitHub calls. You can also read one project's file at `/projects/<slug>/status`, or on its page under Status file.
 
-Tasks are built **one at a time** by default, because they usually build on each other. The next task starts after you merge the last one's PR. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
+Tasks are built **one at a time**, because they usually build on each other. The coordinator starts the next task after you merge the last one's PR. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
 
 ### How agents hand work back
 
-Agents only reply in text, and Jef reads a few plain markers in those replies:
+Research and implementation agents only reply in text, to their coordinator:
 
-| Who | Marker | What Jef does |
+| Who | Writes | What happens |
 | --- | --- | --- |
-| Coordinator | `ACTION: start-research` on its own line, after you say go | Starts the research agent |
-| Research agent | Its whole final reply | Saves it as `research.md`, then asks the coordinator for tasks |
-| Coordinator | A fenced `tasks` block with a numbered list | Writes `tasks.md` for you to approve (a new block replaces it, until you approve) |
-| Coordinator | `ACTION: approve-tasks` on its own line, while the list waits (never in the same reply as a new `tasks` block) | Approves the tasks and starts building |
-| Implementer | `STATUS: working` or `STATUS: stuck <reason>` | Updates the agent's note |
-| Implementer | A fenced `pr` block (title and description), then `STATUS: ready` | Checks for secrets, pushes the branch and opens the PR (or updates the open one) |
+| Research agent | Its whole final reply | Jef saves it as `research.md` and wakes the coordinator |
+| Implementer | `STATUS: working` or `STATUS: stuck <reason>` | The coordinator reads it; it nudges, answers, or asks you |
+| Implementer | A fenced `pr` block (title and description), then `STATUS: ready` | The coordinator runs `jef project publish`, and Jef checks for secrets, pushes the branch and opens the PR (or updates the open one) |
 
-The skills in `skills/` tell each agent how to write these.
+The skills in `skills/` tell each agent how to work. Each agent's skill is sent with every turn.
 
 ### Agents are chats
 
@@ -113,7 +136,7 @@ Every agent is a named Claude Code session with its own conversation:
 - **Messaging** it later (a heartbeat nudge, a small fix) continues the same session, so it remembers everything so far.
 - **Stopping** an agent also stops every agent it spawned, so stopping a coordinator stops its workers.
 
-Nobody is around to answer permission prompts, so each role gets a fixed list of what it may do, and anything else is refused. **No agent can push, open a PR or merge**, whatever its role: implementers only commit, and Jef's own code does the rest.
+Nobody is around to answer permission prompts, so each role gets a fixed list of what it may do, and anything else is refused. **No agent can push, open a PR or merge**, whatever its role: implementers only commit, coordinators ask Jef, and Jef's own code does the rest.
 
 ### Chat with Jef
 

@@ -5,6 +5,7 @@
     jef status   is Jef running, and where?
     jef attach   watch the background session (Ctrl+B then D to leave it)
     jef stop     stop the background session
+    jef project  (for coordinators) run a project; see jef.coordinate
 
 Plain ``jef`` is the same as ``jef run``.
 """
@@ -175,6 +176,12 @@ def cmd_stop(args: argparse.Namespace, tmux: Tmux) -> int:
     return 0
 
 
+def cmd_project(args: argparse.Namespace) -> int:
+    from jef import coordinate
+
+    return coordinate.run(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jef", description="Jef: a user-friendly software factory.")
     parser.add_argument("--version", action="version", version=f"jef {__version__}")
@@ -192,6 +199,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="is Jef running, and where?")
     sub.add_parser("attach", help="watch the background session")
     sub.add_parser("stop", help="stop the background session")
+    from jef import coordinate
+
+    coordinate.add_parser(sub)
     return parser
 
 
@@ -208,6 +218,7 @@ def main(argv: list[str] | None = None, tmux: Tmux | None = None) -> int:
         "status": lambda: cmd_status(args, tmux),
         "attach": lambda: cmd_attach(args, tmux),
         "stop": lambda: cmd_stop(args, tmux),
+        "project": lambda: cmd_project(args),
     }
     return handlers[args.command]()
 

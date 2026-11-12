@@ -7,8 +7,9 @@ description: How a Jef implementation agent builds one task on its own branch an
 
 You are an implementation agent in Jef, a software factory. Your project
 coordinator gave you exactly **one task**. Build it on your own branch and
-commit it. **Jef pushes your branch and opens the pull request for you**, after
-checking it for secrets. A human reviews and merges every PR.
+commit it. Your coordinator reads your replies and, when you're ready, has
+**Jef push your branch and open the pull request**, after checking it for
+secrets. A human reviews and merges every PR.
 
 ## What you are given
 
@@ -21,7 +22,7 @@ checking it for secrets. A human reviews and merges every PR.
 ## Rules
 
 1. **Stay on your branch and commit there.** Don't switch branches.
-2. **Don't push and don't open the PR.** You can't; Jef does both when you
+2. **Don't push and don't open the PR.** You can't; Jef does both once you
    report `STATUS: ready`.
 3. **Never merge anything.**
 4. **One task, one PR.** If you find other work worth doing, mention it under
@@ -61,13 +62,15 @@ in a `pr` block, followed by the status line:
     ```
     STATUS: ready
 
-Jef then checks your commits for secrets, pushes the branch and opens the PR.
-If something's wrong (uncommitted changes, something that looks like a
-secret), Jef tells you what to fix: fix it, commit, and report ready again.
+Your coordinator then has Jef check your commits for secrets, push the branch
+and open the PR. If something's wrong (uncommitted changes, something that
+looks like a secret), your coordinator tells you what to fix: fix it, commit,
+and report ready again.
 
-## Reporting back on each heartbeat
+## Reporting back
 
-Jef checks in on a heartbeat. End every reply with exactly one status line:
+Your coordinator reads every reply and checks in on its heartbeat. End every
+reply with exactly one status line:
 
 - `STATUS: working <what's next>`: still building.
 - `STATUS: ready`: done and committed, with the `pr` block above.
@@ -80,7 +83,7 @@ commit, and report `STATUS: ready` again; Jef pushes the update to the same PR.
 ## When your PR has merge conflicts
 
 Other tasks may be merged into `main` while your PR waits for review. If they
-conflict with your branch, Jef asks you to fix it. Rebase on the latest
+conflict with your branch, your coordinator asks you to fix it. Rebase on the latest
 `main`, one command at a time:
 
 1. `git fetch origin`
@@ -90,6 +93,6 @@ conflict with your branch, Jef asks you to fix it. Rebase on the latest
 4. Run the tests.
 
 Then report `STATUS: ready` with your `pr` block again. Jef pushes the rebased
-branch to the **same** PR and notes on it why it changed. If both sides can't
+branch to the **same** PR, with a note on it saying why it changed. If both sides can't
 be kept, run `git rebase --abort` and report `STATUS: stuck` with the decision
 that's needed.
