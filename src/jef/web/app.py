@@ -17,7 +17,7 @@ from jef.chats import Chats, ChatError, Status
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
 from jef.pipeline import IMPLEMENTERS_AT_ONCE, Phase, Pipeline, PipelineError
-from jef.projects import StartError, gh_clone, known_repos, load_project, parse_repo, projects_on_repo, start_project
+from jef.projects import StartError, gh_clone, known_repos, load_project, parse_repo, projects_on_repo, start_project, used_backlog_numbers
 from jef.tasks import TaskList, TaskStatus
 from jef.usage import Usage, agent_usage, format_cost, format_tokens, project_total, project_usage
 from jef.workspace import Workspace
@@ -160,7 +160,7 @@ def create_app(
     def add_backlog_item(feature: str = Form("")):
         backlog = Backlog.load(ws.backlog_file)
         try:
-            backlog.add(feature)
+            backlog.add(feature, reserved=used_backlog_numbers(ws))
         except ValueError:
             return RedirectResponse("/?error=empty", status_code=303)
         backlog.save(ws.backlog_file)

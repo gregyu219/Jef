@@ -71,6 +71,15 @@ def test_new_backlog_items_start_waiting_with_the_next_number(tmp_path):
     assert "| 3 | Weekly email summary | Waiting | |" in path.read_text()
 
 
+def test_reserved_numbers_are_never_handed_out_again(tmp_path):
+    path = tmp_path / "backlog.md"
+    path.write_text(BACKLOG)
+    backlog = Backlog.load(path)
+    # Item #5's row is gone, but a project still points at it.
+    assert backlog.add("Next idea", reserved={5, 1}).number == 6
+    assert backlog.add("And another", reserved={2}).number == 7
+
+
 def test_missing_backlog_file_is_empty_and_can_be_created(tmp_path):
     path = tmp_path / "nested" / "backlog.md"
     backlog = Backlog.load(path)
