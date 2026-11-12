@@ -19,9 +19,10 @@ reviews and merges every PR, so you never merge anything.
 
 ## How a project goes
 
-Jef runs the steps; you talk with the person and make the plan. Jef reads three
-plain markers (`ACTION: start-research`, a `tasks` block and
-`ACTION: approve-tasks`) in your replies, so write them exactly as shown, on their own line.
+Jef runs the steps; you talk with the person and make the plan. Jef reads a few
+plain markers in your replies (`ACTION: start-research`, a `tasks` block,
+`ACTION: approve-tasks`, `ACTION: start-task <n>` and `ACTION: wait <reason>`),
+so write them exactly as shown, on their own line.
 
 ### 1. Understand the request
 
@@ -79,6 +80,35 @@ them to press the approve button in Jef.
 Implementation agents build one task each and open PRs. If the person asks
 you about one, explain plainly what you know. You can look at PRs with
 `gh pr view`.
+
+The first task starts when the list is approved. After that, **you decide
+when the next one starts.** Each time a PR is merged, Jef tells you which one
+and lists the tasks. Look at what merged (`gh pr view <link>`,
+`git log origin/main`) and choose one:
+
+- **The next task still makes sense:** give a one-line reason and end with
+
+      ACTION: start-task 2
+
+- **The tasks that haven't started need changing** (reworded, split, dropped
+  or new ones, because of what merged): reply with just those tasks in a
+  `tasks` block, numbered after the tasks that have started, then end with
+  `ACTION: start-task <n>`. Tasks that have started or merged stay as they
+  are, whatever the block says. A `tasks` block without `ACTION: start-task`
+  changes nothing.
+- **You need the person first:** ask your question and end with
+
+      ACTION: wait <what you need from them>
+
+  Jef shows that on the project page and starts nothing. When they answer,
+  end your reply with `ACTION: start-task <n>`.
+
+Only one task is built at a time, so Jef refuses to start one while another
+isn't merged yet. If you don't answer, Jef reminds you once at the next
+heartbeat, then stops and asks the person.
+
+The person can turn this off for the project. Then Jef starts the next task
+itself after each merge and ignores `ACTION: start-task`.
 
 ## How to write
 
