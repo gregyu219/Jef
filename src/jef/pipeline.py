@@ -53,6 +53,7 @@ from jef.chats import Agent, Chats, ChatError, Role, Status, load_roster
 from jef.projects import (
     DEFAULT_HEARTBEAT_MINUTES,
     MAX_IMPLEMENTERS_AT_ONCE,
+    auto_approve,
     goal_fields,
     implementers_at_once,
     load_project,
@@ -257,6 +258,16 @@ class Pipeline:
     def set_coordinator_decides(self, slug: str, on: bool) -> None:
         set_goal_field(self.workspace, slug, "Coordinator decides", "yes" if on else "no")
 
+    def auto_approve(self, slug: str) -> bool:
+        """Whether Jef's heartbeat approves the task list by itself once the
+        coordinator has posted it and finished its turn. Off unless goal.md
+        says ``Auto approve: yes``."""
+        return auto_approve(self.workspace, slug)
+
+    def set_auto_approve(self, slug: str, on: bool) -> None:
+        with self.chats.lock:
+            set_goal_field(self.workspace, slug, "Auto approve", "yes" if on else "no")
+
     def models(self, slug: str) -> dict[Role, str]:
         """Each level's model for this project: one of ``models.CHOICES``."""
         return {role: models.model_setting(self.workspace, slug, role) for role in models.LEVELS}
@@ -435,10 +446,12 @@ class Pipeline:
             return "Saved the task list. It now waits for the person's approval:\n" + self._task_lines(tasks)
 
     def approve_tasks(self, slug: str, by: str = "you") -> str:
+        """``by`` is "you", "auto" (the heartbeat, because Auto approve is on)
+        or the coordinator's name. Only the coordinator has to wait."""
         with self.chats.lock:
             if self.phase(slug) is not Phase.APPROVAL:
                 raise PipelineError("There are no tasks waiting for approval.")
-            if by != "you":
+            if by not in ("you", "auto"):
                 if not self.coordinator_decides(slug):
                     raise PipelineError("The person turned off coordinator approval for this project. Ask them to approve.")
                 proposed = goal_fields(self.workspace, slug).get("tasks proposed", "")
@@ -451,6 +464,12 @@ class Pipeline:
             set_goal_field(self.workspace, slug, "Tasks approved", "yes")
             if by == "you":
                 self._tell_coordinator(slug, "The person approved the tasks. Start the first one with `jef task start 1`.")
+            elif by == "auto":
+                self._tell_coordinator(
+                    slug,
+                    "Jef auto-approved the task list (the person turned on Auto approve). "
+                    "Start the first task with `jef task start 1`.",
+                )
             self.write_status(slug)
             return "The tasks are approved. Start the first with `jef task start 1`."
 
@@ -761,6 +780,11 @@ class Pipeline:
             coordinator = next((a for a in agents if a.name == project.coordinator_agent), None)
             if coordinator is None or coordinator.status is not Status.IDLE:
                 return  # it's busy (with you or a heartbeat); wake it later
+            if phase is Phase.APPROVAL and self.auto_approve(slug) and not self.problem(slug):
+                # The coordinator posted the list and finished its turn: approve
+                # it, and the news below wakes the coordinator to start building.
+                self.approve_tasks(slug, by="auto")
+                phase = Phase.BUILDING
             now = self.now()
             last = self._last_wake.setdefault(slug, now)  # after a restart, wait a full interval
             finished = []

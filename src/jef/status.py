@@ -30,7 +30,7 @@ from pathlib import Path
 
 from jef import mdtable
 from jef.chats import Agent, Status
-from jef.projects import goal_fields, implementers_at_once, load_project
+from jef.projects import auto_approve, goal_fields, implementers_at_once, load_project
 from jef.tasks import TaskList, TaskStatus
 from jef.workspace import Workspace
 
@@ -146,6 +146,7 @@ def render_status(ws: Workspace, slug: str, agents: list[Agent], now: datetime |
             f"- Problem: {_one_line(problem, 300)}",
             f"- Tasks: {merged} of {len(tasks)} merged" if tasks else "- Tasks: none yet",
             f"- Implementers at once: {implementers_at_once(ws, slug)}",
+            f"- Auto approve: {'on' if auto_approve(ws, slug) else 'off'}",
             f"{UPDATED} {stamp}",
             "",
         ]

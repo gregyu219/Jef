@@ -139,7 +139,8 @@ def goal_text(item: BacklogItem, repo: str, coordinator: str) -> str:
         f"- Coordinator: {coordinator}\n"
         f"- Backlog item: #{item.number}\n"
         f"- Started: {date.today().isoformat()}\n"
-        f"- Heartbeat: {DEFAULT_HEARTBEAT_MINUTES} minutes\n\n"
+        f"- Heartbeat: {DEFAULT_HEARTBEAT_MINUTES} minutes\n"
+        f"- Auto approve: {'yes' if item.auto_approve else 'no'}\n\n"
         "## What you asked for\n\n"
         f"{item.feature}\n"
     )
@@ -169,6 +170,12 @@ def implementers_at_once(ws: Workspace, slug: str) -> int:
     if value.isdigit() and 1 <= int(value) <= MAX_IMPLEMENTERS_AT_ONCE:
         return int(value)
     return DEFAULT_IMPLEMENTERS_AT_ONCE
+
+
+def auto_approve(ws: Workspace, slug: str) -> bool:
+    """Whether Jef's heartbeat approves the project's task list by itself,
+    from goal.md's ``Auto approve`` field. Off unless it says ``yes``."""
+    return goal_fields(ws, slug).get("auto approve", "").lower() == "yes"
 
 
 def set_goal_field(ws: Workspace, slug: str, key: str, value: str) -> None:
