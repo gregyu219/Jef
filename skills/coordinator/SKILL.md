@@ -18,8 +18,9 @@ merges every PR, so you never merge anything.
   `gh pr view`, `gh pr diff` and `gh pr checks`. You can't change code
   yourself; implementers do that.
 - You act through **your `jef` commands** (below). Jef carries each one out within
-  a few seconds and prints the result. Jef keeps the rules (one task at a
-  time, only your own agents, no secrets pushed), so if it refuses, it says why.
+  a few seconds and prints the result. Jef keeps the rules (no more tasks at
+  once than the project allows, only your own agents, no secrets pushed), so
+  if it refuses, it says why.
 
 ## Your commands
 
@@ -31,7 +32,7 @@ Run one simple command at a time, with arguments in double quotes.
 | `jef research start "what to look into"` | Start the research agent (the brief is optional). |
 | `jef tasks set "First task" "Second task"` | Set the task list, one quoted title per task. Tasks are numbered 1, 2, 3… in that order. |
 | `jef tasks approve` | Approve the list yourself (only allowed in some cases; see below). |
-| `jef task start 1` | Start task 1. Its implementer is always named after the task: `impl-1`. |
+| `jef task start 1` | Start task 1. Its implementer is always named after the task: `impl-1`. Jef refuses if the project already has as many unmerged tasks as it builds at once. |
 | `jef task publish 1` | Have Jef check task 1's commits for secrets, push its branch and open its PR. Run it again later to update the same PR; add `--note "why"` to leave a comment on it. |
 | `jef prs check` | Ask GitHub about every PR: merged, open, conflicts, closed. Records merges. |
 | `jef agent read impl-1` | An agent's latest reply. |
@@ -74,11 +75,14 @@ Jef wakes you when research is done; read `research.md`. Turn it into tasks:
 - Each task becomes **one PR**: small, focused, and mergeable on its own.
 - Order them so each builds on the ones before it. The first task should
   work with nothing else merged.
+- Put tasks that don't depend on each other next to each other, so they can
+  be built side by side (see "3. Build").
 - A small feature is often **one task**. Don't split work just to have more.
 - Title each task in plain words, like "Show the version in the page footer".
 
 Run `jef tasks set "…" "…"`, then tell the person the plan and ask them to
-approve it in Jef. If they ask for changes, run `jef tasks set` again with the whole
+approve it in Jef. In the plan, say which tasks can be built at the same time
+and which must wait for another one to merge. If they ask for changes, run `jef tasks set` again with the whole
 new list.
 
 If they haven't approved it after a whole heartbeat, you may decide: if the
@@ -87,10 +91,22 @@ again. Don't approve if they asked for changes or a question is still open.
 Jef refuses `jef tasks approve` before the list has waited a heartbeat, or if the
 person turned that off for the project.
 
-### 3. Build, one task at a time
+### 3. Build
 
-When the tasks are approved, run `jef task start 1`. Only one task is
-built at a time.
+Each project builds up to a set number of tasks at once. The person sets it
+on the project page; `jef overview` shows it as `Implementers at once`
+(1 unless they changed it). Jef refuses `jef task start` past that limit.
+
+- Every implementer starts from the latest `main`. So **a task that needs
+  another task's code must wait until that task's PR is merged.**
+- Tasks that don't depend on each other may run side by side, up to the
+  limit. They can still clash if they touch the same files; that only means
+  a rebase later (see the heartbeat checklist).
+- If you're not sure two tasks are independent, run them one after the other.
+
+When the tasks are approved, run `jef task start 1`. If the limit is more
+than 1, also start the next tasks that don't need task 1's code, one
+`jef task start N` each, up to the limit.
 
 When an implementer finishes a turn, read it (`jef agent read impl-1`). Its
 reply ends with a status line:
@@ -117,7 +133,8 @@ Each heartbeat, go through this:
 3. **Open PRs**: run `jef prs check`.
    - **Merged**: Jef records it and stops that implementer. Look at what
      merged (`git fetch`, `git log origin/main`), then decide what's next:
-     start the next task with `jef task start N`; if the tasks that
+     start every task that's now unblocked (everything it needs has merged),
+     one `jef task start N` each, up to the limit; if the tasks that
      haven't started need changing because of what merged, run `jef tasks set` with the
      remaining ones first (Jef keeps the started ones); if you need the
      person, `jef wait`.
