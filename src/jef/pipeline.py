@@ -13,7 +13,10 @@ out from its inbox (``jef.inbox``). Jef doesn't decide anything itself.
   against the rules (no more tasks at once than the project allows, only the
   coordinator's own agents, secrets never pushed, never ``main``),
 - wakes each coordinator once per heartbeat (an hour by default), or sooner
-  when one of its agents finishes a turn or you press a button,
+  when one of its agents finishes a turn, a PR merges or you press a button,
+- every few minutes, asks GitHub (with ``gh``, no LLM) whether each PR
+  waiting for review has merged; a merge is recorded as ``jef prs check``
+  would, and the coordinator is woken to start the next task,
 - saves the research agent's findings as research.md, and
 - reads the files to keep status.md up to date. That costs nothing: no LLM
   call and no GitHub call.
@@ -65,6 +68,7 @@ log = logging.getLogger("jef.pipeline")
 RESEARCH_AGENT = "research"
 INBOX_SECONDS = 2  # how often Jef looks for coordinators' requests
 TICK_SECONDS = 30  # how often Jef re-reads the files and sees who to wake
+PR_POLL_SECONDS = 5 * 60  # how often Jef asks GitHub whether a PR waiting for review merged
 MAX_CONTEXT_CHARS = 30_000
 MAX_READ_CHARS = 12_000
 
@@ -209,6 +213,7 @@ class Pipeline:
     _events: dict[str, list[str]] = field(default_factory=dict)  # news for the coordinator's next wake
     _last_checked: dict[str, float] = field(default_factory=dict)
     _budget_checked: dict[str, tuple[object, str]] = field(default_factory=dict)
+    _last_pr_poll: dict[str, float] = field(default_factory=dict)
 
     # -- reading project state
 
@@ -359,7 +364,7 @@ class Pipeline:
     def forget(self, slug: str) -> None:
         """Drop what Jef remembers about a project that has been deleted."""
         with self.chats.lock:
-            for remembered in (self._last_wake, self._events, self._last_checked, self._budget_checked):
+            for remembered in (self._last_wake, self._events, self._last_checked, self._budget_checked, self._last_pr_poll):
                 remembered.pop(slug, None)
 
     def last_checked(self, slug: str) -> float | None:
@@ -566,11 +571,8 @@ class Pipeline:
                 state = self.pr_state(task.pr)
                 label = f"Task {task.number} ({pr_label(task.pr)})"
                 if state == "MERGED":
-                    task.status, changed = TaskStatus.MERGED, True
-                    set_goal_field(self.workspace, slug, "Last merged", task.pr)
-                    agent = self._agent(slug, task.agent) if task.agent else None
-                    if agent is not None and agent.status is not Status.STOPPED:
-                        self.chats.stop(slug, agent.name)
+                    self._record_merge(slug, task)
+                    changed = True
                     lines.append(f"{label}: merged. Its implementer is stopped.")
                 elif state == "CLOSED":
                     lines.append(f"{label}: closed without merging. Decide with the person what to do.")
@@ -591,6 +593,59 @@ class Pipeline:
                 lines.append("Every task is merged, so the project is done. Tell the person; Jef stops you after this turn.")
             self.write_status(slug)
             return "\n".join(lines) or "No task has a PR yet."
+
+    def poll_merges(self, slug: str) -> list[str]:
+        """Jef's own check, every few minutes while building: has any PR that's
+        waiting for review been merged? Each merge is recorded as ``jef prs
+        check`` would, and the coordinator is woken to start the next task.
+        Only asks GitHub for the state (no tokens); conflicts and closed PRs
+        stay with the coordinator. Returns the news it queued."""
+        with self.chats.lock:
+            if load_project(self.workspace, slug) is None or self.phase(slug) is not Phase.BUILDING:
+                return []
+            if self._budget_problem(slug):
+                return []
+            now = self.now()
+            if now - self._last_pr_poll.get(slug, float("-inf")) < PR_POLL_SECONDS:
+                return []
+            self._last_pr_poll[slug] = now
+            waiting = [(t.number, t.pr) for t in self.tasks(slug).tasks if t.status is TaskStatus.PENDING_REVIEW and t.pr]
+        # Ask GitHub without the lock: each call can take up to 30 seconds,
+        # and the page and the inbox mustn't wait for it.
+        merged = {(number, url) for number, url in waiting if self.pr_state(url) == "MERGED"}
+        if not merged:
+            return []
+        with self.chats.lock:
+            tasks = self.tasks(slug)
+            news = []
+            for task in tasks.tasks:
+                # Re-checked: `jef prs check` may have recorded it meanwhile.
+                if (task.number, task.pr) in merged and task.status is not TaskStatus.MERGED:
+                    self._record_merge(slug, task)
+                    stopped = f" and stopped {task.agent}" if task.agent else ""
+                    news.append(
+                        f"{pr_label(task.pr)} merged (task {task.number}: {task.title}). "
+                        f"Jef recorded it{stopped}; start the next task."
+                    )
+            if not news:
+                return []
+            self._save_tasks(slug, tasks)
+            if all(t.status is TaskStatus.MERGED for t in tasks.tasks):
+                self._finish(slug)
+            else:
+                for item in news:
+                    self._tell_coordinator(slug, item)
+            self.write_status(slug)
+            return news
+
+    def _record_merge(self, slug: str, task: Task) -> None:
+        """Mark a task Merged, remember its PR as the last merged, and stop
+        its implementer. The caller saves the tasks."""
+        task.status = TaskStatus.MERGED
+        set_goal_field(self.workspace, slug, "Last merged", task.pr)
+        agent = self._agent(slug, task.agent) if task.agent else None
+        if agent is not None and agent.status is not Status.STOPPED:
+            self.chats.stop(slug, agent.name)
 
     def _finish(self, slug: str) -> None:
         set_goal_field(self.workspace, slug, "Done", "yes")
@@ -819,7 +874,8 @@ class Pipeline:
 class Heartbeat:
     """Jef's timer, in a background thread while Jef runs: it carries out
     coordinators' requests every couple of seconds, and every half minute
-    re-reads each project and wakes coordinators that are due."""
+    re-reads each project and wakes coordinators that are due. Every few
+    minutes it also asks GitHub whether a PR waiting for review has merged."""
 
     def __init__(self, pipeline: Pipeline, every: float = INBOX_SECONDS, tick_every: float = TICK_SECONDS):
         self.pipeline = pipeline
@@ -847,6 +903,10 @@ class Heartbeat:
     def tick_all(self) -> None:
         self.inbox_all()
         for slug in self.pipeline.workspace.project_slugs():
+            try:
+                self.pipeline.poll_merges(slug)  # before tick, so its news wakes the coordinator
+            except Exception:
+                log.exception("Couldn't check PRs for project %s", slug)
             try:
                 self.pipeline.tick(slug)
             except Exception:  # One broken project mustn't stop the others.
