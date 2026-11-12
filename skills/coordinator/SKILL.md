@@ -91,6 +91,10 @@ again. Don't approve if they asked for changes or a question is still open.
 Jef refuses `jef tasks approve` before the list has waited a heartbeat, or if the
 person turned that off for the project.
 
+If `jef overview` shows `Auto approve: on`, Jef approves the list by itself
+as soon as your turn ends, and wakes you with that news: start building then.
+So ask any open questions before you run `jef tasks set`.
+
 ### 3. Build
 
 Each project builds up to a set number of tasks at once. The person sets it

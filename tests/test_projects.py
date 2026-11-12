@@ -5,7 +5,7 @@ from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Chats, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus
-from jef.projects import StartError, load_project, parse_repo, slugify, start_project
+from jef.projects import StartError, auto_approve, goal_fields, load_project, parse_repo, slugify, start_project
 from jef.web.app import create_app
 from jef.workspace import Workspace
 
@@ -82,6 +82,19 @@ def test_starting_a_project(env):
     assert start_project(ws, 2, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical).coordinator == "Alan"
     with pytest.raises(StartError, match="already been started"):
         start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)
+
+
+def test_starting_copies_auto_approve_into_goal_md(env):
+    ws, chats, clone, _, _ = env
+    backlog = Backlog.load(ws.backlog_file)
+    backlog.items[1].auto_approve = True
+    backlog.save(ws.backlog_file)
+    off = start_project(ws, 1, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)
+    on = start_project(ws, 2, "gregyu219/Jef", chats, clone=clone, choose_name=alphabetical)
+    assert goal_fields(ws, off.slug)["auto approve"] == "no"
+    assert goal_fields(ws, on.slug)["auto approve"] == "yes"
+    assert auto_approve(ws, on.slug) and not auto_approve(ws, off.slug)
+    assert Backlog.load(ws.backlog_file).items[1].auto_approve  # the row keeps it
 
 
 def test_a_failed_clone_leaves_nothing_behind(env):

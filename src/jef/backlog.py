@@ -4,10 +4,13 @@ Stored in ``backlog.md`` as a table:
 
     # Backlog
 
-    | # | Feature | Status | Coordinator |
-    | --- | --- | --- | --- |
-    | 1 | To-do list app | In progress | Ada |
-    | 2 | Dark mode | Waiting | |
+    | # | Feature | Status | Coordinator | Auto approve |
+    | --- | --- | --- | --- | --- |
+    | 1 | To-do list app | In progress | Ada | |
+    | 2 | Dark mode | Waiting | | yes |
+
+``Auto approve`` is ``yes`` when Jef's heartbeat should approve the item's
+task list by itself. It's copied into the project's goal.md when it starts.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from typing import Iterable
 
 from jef import mdtable
 
-HEADERS = ["#", "Feature", "Status", "Coordinator"]
+HEADERS = ["#", "Feature", "Status", "Coordinator", "Auto approve"]
 
 
 class BacklogStatus(str, Enum):
@@ -41,6 +44,7 @@ class BacklogItem:
     feature: str
     status: BacklogStatus = BacklogStatus.WAITING
     coordinator: str = ""
+    auto_approve: bool = False
 
 
 class Backlog:
@@ -65,6 +69,7 @@ class Backlog:
                     feature=row[col["feature"]] if "feature" in col else "",
                     status=BacklogStatus.parse(row[col["status"]]) if "status" in col and row[col["status"]] else BacklogStatus.WAITING,
                     coordinator=row[col["coordinator"]] if "coordinator" in col else "",
+                    auto_approve="auto approve" in col and row[col["auto approve"]].strip().lower() == "yes",
                 )
             )
         return cls(items, doc)
@@ -94,7 +99,7 @@ class Backlog:
     def render(self) -> str:
         self._doc.headers = list(HEADERS)
         self._doc.rows = [
-            [str(i.number), i.feature, i.status.value, i.coordinator] for i in self.items
+            [str(i.number), i.feature, i.status.value, i.coordinator, "yes" if i.auto_approve else ""] for i in self.items
         ]
         return mdtable.render(self._doc)
 

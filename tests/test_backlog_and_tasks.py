@@ -5,10 +5,17 @@ from jef.tasks import TaskList, TaskStatus
 
 BACKLOG = """# Backlog
 
+| # | Feature | Status | Coordinator | Auto approve |
+| --- | --- | --- | --- | --- |
+| 1 | To-do list app | In progress | Ada | |
+| 2 | Dark mode for the to-do app | Waiting | | yes |
+"""
+
+OLD_BACKLOG = """# Backlog
+
 | # | Feature | Status | Coordinator |
 | --- | --- | --- | --- |
 | 1 | To-do list app | In progress | Ada |
-| 2 | Dark mode for the to-do app | Waiting | |
 """
 
 TASKS = """# Tasks: To-do list app
@@ -33,12 +40,22 @@ def test_backlog_loads_the_documented_format(tmp_path):
     assert backlog.items[0].status is BacklogStatus.IN_PROGRESS
     assert backlog.items[0].coordinator == "Ada"
     assert backlog.items[1].status is BacklogStatus.WAITING
+    assert [i.auto_approve for i in backlog.items] == [False, True]
 
 
 def test_backlog_round_trip_is_unchanged(tmp_path):
     path = tmp_path / "backlog.md"
     path.write_text(BACKLOG)
     assert Backlog.load(path).render() == BACKLOG
+
+
+def test_old_backlog_without_auto_approve_loads_as_off_and_gains_the_column(tmp_path):
+    path = tmp_path / "backlog.md"
+    path.write_text(OLD_BACKLOG)
+    backlog = Backlog.load(path)
+    assert backlog.items[0].auto_approve is False
+    backlog.items[0].auto_approve = True
+    assert "| 1 | To-do list app | In progress | Ada | yes |" in backlog.render()
 
 
 def test_removing_a_waiting_item_leaves_the_rest_unchanged(tmp_path):
@@ -48,10 +65,10 @@ def test_removing_a_waiting_item_leaves_the_rest_unchanged(tmp_path):
     removed = backlog.remove(2)
     assert removed.feature == "Dark mode for the to-do app"
     backlog.save(path)
-    assert path.read_text() == BACKLOG.replace("| 2 | Dark mode for the to-do app | Waiting | |\n", "")
+    assert path.read_text() == BACKLOG.replace("| 2 | Dark mode for the to-do app | Waiting | | yes |\n", "")
 
 
-WITH_DONE = BACKLOG + "| 3 | Weekly email summary | Done | Bea |\n"
+WITH_DONE = BACKLOG + "| 3 | Weekly email summary | Done | Bea | |\n"
 
 
 def test_removing_a_done_item_leaves_the_rest_unchanged(tmp_path):

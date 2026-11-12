@@ -64,7 +64,7 @@ Jef has four levels. Each one hands work to the level below it and keeps track o
 
 1. **Tell Jef what you want.** Jef adds it to your backlog as *Waiting*. Nothing starts until you confirm, because every running project spends tokens.
 2. **Confirm and connect GitHub.** Jef asks which GitHub repo the code goes to and which account commits it, then creates a named project coordinator.
-3. **Research.** When you say go, the coordinator starts one research agent, which writes `research.md`. The coordinator turns that into `tasks.md` for you to approve. If you haven't approved it after a whole heartbeat, the coordinator may approve or revise it. You can turn that off per project.
+3. **Research.** When you say go, the coordinator starts one research agent, which writes `research.md`. The coordinator turns that into `tasks.md` for you to approve. If you haven't approved it after a whole heartbeat, the coordinator may approve or revise it. You can turn that off per project. If you turned on *Auto approve* for the backlog item, Jef approves the list itself as soon as the coordinator has posted it.
 4. **Build.** The coordinator starts one implementation agent per task. Tasks that don't depend on each other can be built side by side, up to the project's *Implementers at once* setting (1 by default). It reads each implementer's replies, nudges it on its heartbeat, has Jef open the PR when it's ready, and checks the PR on GitHub. After a merge it starts the tasks that are now unblocked, revising the ones that are left if what merged changed the picture. If a PR gets merge conflicts, it has the implementer rebase, and Jef pushes the fix to the same PR. The project page shows who started each agent.
 5. **Review.** You review each PR on GitHub and merge it. If one misses the point, chat with its coordinator by name and it will revise the work or start over.
 
@@ -106,7 +106,8 @@ A coordinator can't wake itself: each agent is a Claude Code session that only r
 
 - **on its heartbeat**, once per interval (an hour by default; change it on the project page), while it's planning, waiting for approval (if it may approve) or building, and nothing is waiting for you,
 - **straight away when one of its agents finishes a turn**, so it can read the reply and act,
-- when you press **Approve**, **Start research**, **Try again** or **Ask the coordinator to check now**.
+- when you press **Approve**, **Start research**, **Try again** or **Ask the coordinator to check now**,
+- **when Jef auto-approves the task list**: with *Auto approve* on, the half-minute check approves the list once the coordinator has posted it and finished its turn, then wakes it to start building.
 
 Each wake-up says what changed and includes the project's status. On its heartbeat the coordinator nudges implementers that are still working, runs `jef prs check` to check merges and conflicts, and starts the next tasks: as soon as the last one's PR is open, or, for a task that needs another one's code, once that PR has merged. Heartbeats cost a coordinator turn each, so don't set the interval too short.
 

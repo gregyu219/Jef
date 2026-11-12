@@ -87,6 +87,7 @@ def test_render_and_read_round_trip(ws):
         "problem": "none",
         "tasks": "1 of 3 merged",
         "implementers at once": "1",
+        "auto approve": "off",
         "updated": "2026-11-11 14:05",
     }
     rows = mdtable.parse(text).rows

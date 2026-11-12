@@ -135,13 +135,13 @@ def test_user_text_is_escaped(client):
 
 STARTED_AND_WAITING = """# Backlog
 
-| # | Feature | Status | Coordinator |
-| --- | --- | --- | --- |
-| 1 | To-do list app | In progress | Ada |
-| 2 | Dark mode | Waiting | |
+| # | Feature | Status | Coordinator | Auto approve |
+| --- | --- | --- | --- | --- |
+| 1 | To-do list app | In progress | Ada | |
+| 2 | Dark mode | Waiting | | |
 """
 
-WITH_DONE = STARTED_AND_WAITING + "| 3 | Weekly email summary | Done | Bea |\n"
+WITH_DONE = STARTED_AND_WAITING + "| 3 | Weekly email summary | Done | Bea | |\n"
 
 
 def test_home_page_shows_delete_for_items_in_every_state(ws, client):

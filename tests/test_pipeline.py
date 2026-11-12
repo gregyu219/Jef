@@ -13,7 +13,7 @@ from jef import coordinate, inbox, models
 from jef.pipeline import PR_POLL_SECONDS, Heartbeat, Phase, Pipeline, PipelineError, last_reply, parse_pr, pr_label
 from jef.publish import PublishError
 from jef.projects import goal_fields, set_goal_field, slugify, start_project
-from jef.status import read_status, status_path
+from jef.status import read_status, render_status, status_path
 from jef.tasks import TaskStatus
 from jef.usage import budget_left
 from jef.web.app import ago, create_app
@@ -359,6 +359,43 @@ def test_no_approval_heartbeat_when_its_turned_off(w):
     w.clock += 3 * 3600
     w.pipeline.tick(w.slug)
     assert len(w.procs["ada"]) == turns
+
+
+def test_auto_approve_approves_once_the_coordinator_is_idle_and_wakes_it(w):
+    w.pipeline.set_auto_approve(w.slug, True)
+    assert w.pipeline.auto_approve(w.slug)
+    research_done(w)
+    w.ok("plan", titles=["A", "B"])
+    w.pipeline.tick(w.slug)
+    assert w.pipeline.phase(w.slug) is Phase.APPROVAL  # not while Ada is still working
+    turns = len(w.procs["ada"])
+    w.reply("ada", "Here's the plan.")
+    assert w.pipeline.phase(w.slug) is Phase.BUILDING
+    assert len(w.procs["ada"]) == turns + 1  # woken straight away
+    assert "Jef auto-approved the task list" in w.last_message("ada")
+    assert "jef task start 1" in w.last_message("ada")
+
+
+def test_auto_approve_waits_while_there_is_a_problem(w):
+    w.pipeline.set_auto_approve(w.slug, True)
+    research_done(w)
+    w.ok("plan", titles=["A"])
+    set_goal_field(w.ws, w.slug, "Problem", "Something broke")
+    w.reply("ada", "Here's the plan.")
+    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
+    w.pipeline.clear_problem(w.slug)
+    assert w.pipeline.phase(w.slug) is Phase.BUILDING
+
+
+def test_auto_approve_is_off_by_default(w):
+    assert goal_fields(w.ws, w.slug)["auto approve"] == "no"
+    assert not w.pipeline.auto_approve(w.slug)
+    tasks_waiting(w)
+    w.pipeline.tick(w.slug)
+    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
+    assert "- Auto approve: off" in render_status(w.ws, w.slug, load_roster(w.ws, w.slug))
+    w.pipeline.set_auto_approve(w.slug, True)
+    assert "- Auto approve: on" in render_status(w.ws, w.slug, load_roster(w.ws, w.slug))
 
 
 def test_plans_can_change_until_building_and_then_only_what_has_not_started(w):
