@@ -18,7 +18,7 @@ reads the newest one, so the home page can show it without any extra call.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,10 +35,25 @@ class Usage:
     cache_write_tokens: int = 0
     cost_usd: float = 0.0
     turns: int = 0  # finished turns (one ``claude -p`` run each)
+    # The part of cache_write_tokens written with the one-hour lifetime, so you
+    # can see the coordinator's 1h cache took effect.
+    cache_write_1h_tokens: int = 0
+    models: tuple[str, ...] = ()  # the models the turns ran on, first seen first
 
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
+
+    @property
+    def prompt_tokens(self) -> int:
+        """Everything sent to the model: uncached input plus cache reads and writes."""
+        return self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        """The share of prompt tokens read from the cache (0 to 1), or None
+        before anything was sent. Higher is cheaper and faster."""
+        return self.cache_read_tokens / self.prompt_tokens if self.prompt_tokens else None
 
     def __add__(self, other: "Usage") -> "Usage":
         return Usage(
@@ -48,7 +63,19 @@ class Usage:
             self.cache_write_tokens + other.cache_write_tokens,
             self.cost_usd + other.cost_usd,
             self.turns + other.turns,
+            self.cache_write_1h_tokens + other.cache_write_1h_tokens,
+            _merge_models(self.models, other.models),
         )
+
+
+def _merge_models(first: tuple[str, ...], second: tuple[str, ...]) -> tuple[str, ...]:
+    return first + tuple(m for m in second if m not in first)
+
+
+def _model_names(value) -> tuple[str, ...]:
+    if not isinstance(value, dict):
+        return ()
+    return tuple(name for name in value if isinstance(name, str) and name)
 
 
 def _int(value) -> int:
@@ -70,6 +97,9 @@ def usage_from_event(event: dict) -> Usage:
     tokens = event.get("usage")
     if not isinstance(tokens, dict):
         tokens = {}
+    written = tokens.get("cache_creation")
+    if not isinstance(written, dict):
+        written = {}
     return Usage(
         input_tokens=_int(tokens.get("input_tokens")),
         output_tokens=_int(tokens.get("output_tokens")),
@@ -77,6 +107,9 @@ def usage_from_event(event: dict) -> Usage:
         cache_write_tokens=_int(tokens.get("cache_creation_input_tokens")),
         cost_usd=_float(event.get("total_cost_usd")),
         turns=1,
+        cache_write_1h_tokens=_int(written.get("ephemeral_1h_input_tokens")),
+        # Claude Code's per-model breakdown, keyed by model name.
+        models=_model_names(event.get("modelUsage")),
     )
 
 
@@ -85,13 +118,23 @@ def agent_usage(chat_file: Path) -> Usage:
     total = Usage()
     if not chat_file.exists():
         return total
+    started_on: tuple[str, ...] = ()  # from the ``system``/``init`` events
     for raw in chat_file.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             event = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        if isinstance(event, dict) and event.get("type") == "result":
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "result":
             total += usage_from_event(event)
+        elif event.get("type") == "system" and event.get("subtype") == "init":
+            model = event.get("model")
+            if isinstance(model, str) and model:
+                started_on = _merge_models(started_on, (model,))
+    if not total.models and started_on:
+        # No result said which model it used (or none finished yet).
+        total = replace(total, models=started_on)
     return total
 
 
@@ -257,3 +300,8 @@ def format_tokens(count: int) -> str:
 
 def format_cost(usd: float) -> str:
     return f"${usd:,.2f}"
+
+
+def format_rate(rate: float | None) -> str:
+    """A cache hit rate as a whole percentage, or a dash when there's none."""
+    return "–" if rate is None else f"{rate:.0%}"

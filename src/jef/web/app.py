@@ -27,6 +27,7 @@ from jef.usage import (
     budget_left,
     budget_usd,
     format_cost,
+    format_rate,
     format_tokens,
     latest_plan_usage,
     project_total,
@@ -47,6 +48,7 @@ def format_reset(when: datetime, now: datetime) -> str:
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 TEMPLATES.env.filters["tokens"] = format_tokens
 TEMPLATES.env.filters["cost"] = format_cost
+TEMPLATES.env.filters["rate"] = format_rate
 TEMPLATES.env.filters["reset"] = format_reset
 TEMPLATES.env.filters["pr_label"] = pr_label
 
