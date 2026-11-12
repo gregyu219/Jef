@@ -84,6 +84,8 @@ Once per heartbeat interval (an hour by default; change it on the project page),
 
 Don't want to wait? The project page has a **Check status now** button that does the same checks straight away: it reads finished replies, asks GitHub about PRs waiting for review, and starts the next task. It doesn't nudge agents, so it costs no tokens.
 
+To see every project at once, press **Read status** above the Projects table on the home page. It rewrites each project's `status.md` from Jef's own files and shows each project's stage and its coordinator's state. It makes no AI or GitHub calls. You can also read one project's file at `/projects/<slug>/status`, or on its page under Status file.
+
 Tasks are built **one at a time** by default, because they usually build on each other. The next task starts after you merge the last one's PR. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
 
 ### How agents hand work back
