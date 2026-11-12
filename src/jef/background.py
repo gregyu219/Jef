@@ -16,6 +16,8 @@ from typing import Callable
 
 SESSION = "jef"
 PORT_OPTION = "@jef_port"
+# "=jef:" means exactly the session named jef. Plain "=jef" fails for set-option and show-options.
+TARGET = f"={SESSION}:"
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess]
 
@@ -44,13 +46,22 @@ class Tmux:
                 "Or run Jef in this terminal instead:  jef run"
             )
 
-    def is_running(self) -> bool:
+    def session_exists(self) -> bool:
+        """Is there any tmux session named "jef", whoever started it?"""
         if not self.which("tmux"):
             return False
-        return self.runner(["tmux", "has-session", "-t", f"={SESSION}"]).returncode == 0
+        return self.runner(["tmux", "has-session", "-t", TARGET]).returncode == 0
+
+    def is_running(self) -> bool:
+        """Is Jef's own session running? Jef marks its session with its port."""
+        return self.session_exists() and self.port() is not None
+
+    def foreign_session(self) -> bool:
+        """A session named "jef" that Jef didn't start. Jef never touches it."""
+        return self.session_exists() and self.port() is None
 
     def port(self) -> int | None:
-        result = self.runner(["tmux", "show-options", "-t", f"={SESSION}", "-v", PORT_OPTION])
+        result = self.runner(["tmux", "show-options", "-t", TARGET, "-v", PORT_OPTION])
         value = result.stdout.strip()
         return int(value) if result.returncode == 0 and value.isdigit() else None
 
@@ -70,7 +81,7 @@ class Tmux:
         result = self.runner(self.start_command(port))
         if result.returncode != 0:
             raise RuntimeError(f"tmux couldn't start Jef: {result.stderr.strip()}")
-        self.runner(["tmux", "set-option", "-t", f"={SESSION}", PORT_OPTION, str(port)])
+        self.runner(["tmux", "set-option", "-t", TARGET, PORT_OPTION, str(port)])
 
     def stop(self) -> None:
-        self.runner(["tmux", "kill-session", "-t", f"={SESSION}"])
+        self.runner(["tmux", "kill-session", "-t", TARGET])

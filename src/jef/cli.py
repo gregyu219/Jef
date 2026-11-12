@@ -20,7 +20,7 @@ import urllib.request
 import webbrowser
 
 from jef import __version__
-from jef.background import SESSION, Tmux, TmuxMissing
+from jef.background import TARGET, Tmux, TmuxMissing
 
 HOST = "127.0.0.1"  # Local only: Jef's UI is never reachable from other machines.
 DEFAULT_PORT = 8765
@@ -60,7 +60,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+FOREIGN_SESSION = (
+    "There's already a tmux session named \"jef\" that Jef didn't start, so Jef "
+    "won't touch it.\nClose or rename it first, for example:  tmux rename-session -t jef my-old-jef"
+)
+
+
 def cmd_start(args: argparse.Namespace, tmux: Tmux) -> int:
+    if tmux.foreign_session():
+        print(FOREIGN_SESSION)
+        return 1
     if tmux.is_running():
         port = tmux.port() or args.port
         print(f"Jef is already running at {url_for(port)}")
@@ -87,6 +96,9 @@ def cmd_start(args: argparse.Namespace, tmux: Tmux) -> int:
 
 
 def cmd_status(args: argparse.Namespace, tmux: Tmux) -> int:
+    if tmux.foreign_session():
+        print(FOREIGN_SESSION)
+        return 1
     if not tmux.is_running():
         print("Jef is not running in the background. Start it with:  jef start")
         return 1
@@ -99,15 +111,21 @@ def cmd_status(args: argparse.Namespace, tmux: Tmux) -> int:
 
 
 def cmd_attach(args: argparse.Namespace, tmux: Tmux) -> int:
+    if tmux.foreign_session():
+        print(FOREIGN_SESSION)
+        return 1
     if not tmux.is_running():
         print("Jef is not running in the background. Start it with:  jef start")
         return 1
     print("Attaching. Press Ctrl+B then D to leave Jef running.")
-    os.execvp("tmux", ["tmux", "attach", "-t", f"={SESSION}"])
+    os.execvp("tmux", ["tmux", "attach", "-t", TARGET])
     return 0  # not reached
 
 
 def cmd_stop(args: argparse.Namespace, tmux: Tmux) -> int:
+    if tmux.foreign_session():
+        print(FOREIGN_SESSION)
+        return 1
     if not tmux.is_running():
         print("Jef is not running in the background.")
         return 0

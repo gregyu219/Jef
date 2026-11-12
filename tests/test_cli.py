@@ -21,9 +21,13 @@ class FakeTmux:
             code = 0 if self.running else 1
             return subprocess.CompletedProcess(cmd, code, "", "")
         if cmd[1] == "show-options":
+            if not self.running or self.port_value is None:
+                return subprocess.CompletedProcess(cmd, 1, "", "invalid option")
             return subprocess.CompletedProcess(cmd, 0, self.port_value + "\n", "")
         if cmd[1] == "new-session":
             self.running = True
+        if cmd[1] == "set-option":
+            self.port_value = cmd[-1]
         if cmd[1] == "kill-session":
             self.running = False
         return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -48,7 +52,7 @@ def test_start_runs_jef_in_tmux_with_caffeinate(capsys):
     inner = new[new.index("--") + 1 :]
     assert inner[:2] == ["caffeinate", "-is"]
     assert inner[2:] == [sys.executable, "-m", "jef", "run", "--no-browser", "--port", "9001"]
-    assert ["tmux", "set-option", "-t", "=jef", "@jef_port", "9001"] in fake.calls
+    assert ["tmux", "set-option", "-t", "=jef:", "@jef_port", "9001"] in fake.calls
     assert "running in the background at http://127.0.0.1:9001" in capsys.readouterr().out
 
 
@@ -98,8 +102,17 @@ def test_status(monkeypatch, capsys):
 def test_stop(capsys):
     fake = FakeTmux(running=True)
     assert cli.main(["stop"], tmux=make_tmux(fake)) == 0
-    assert ["tmux", "kill-session", "-t", "=jef"] in fake.calls
+    assert ["tmux", "kill-session", "-t", "=jef:"] in fake.calls
     assert "Jef stopped" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["start", "status", "attach", "stop"])
+def test_never_touches_a_jef_session_it_did_not_start(command, capsys):
+    # Someone ran "tmux new -s jef" by hand: the session has no Jef port marker.
+    fake = FakeTmux(running=True, port=None)
+    assert cli.main([command], tmux=make_tmux(fake)) == 1
+    assert "Jef didn't start" in capsys.readouterr().out
+    assert not any(c[1] in ("kill-session", "new-session", "attach") for c in fake.calls)
 
 
 def test_plain_jef_means_run(monkeypatch):
