@@ -379,6 +379,49 @@ def test_a_busy_coordinator_is_not_asked_to_decide(w):
     assert "Heartbeat" in w.last_message("ada")
 
 
+def test_heartbeat_approval_can_be_turned_off(w):
+    assert w.pipeline.coordinator_decides(w.slug)  # on by default
+    tasks_waiting(w)
+    w.pipeline.set_coordinator_decides(w.slug, False)
+    assert goal_fields(w.ws, w.slug)["coordinator decides"] == "no"
+    turns = len(w.procs["ada"])
+    w.clock += 3 * 3600
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns  # never asked
+    # Even if it approves on its own, only you can while it's off.
+    w.chats.send(w.slug, "ada", "looks fine to me")
+    w.reply("ada", "Great.\nACTION: approve-tasks")
+    assert w.pipeline.phase(w.slug) is Phase.APPROVAL
+    assert "turned off" in w.agent("ada").note
+    # Turning it back on waits a full interval before asking.
+    w.pipeline.set_coordinator_decides(w.slug, True)
+    turns = len(w.procs["ada"])
+    w.clock += 59 * 60
+    w.pipeline.tick(w.slug)
+    assert len(w.procs["ada"]) == turns
+    w.clock += 60
+    w.pipeline.tick(w.slug)
+    assert "Heartbeat" in w.last_message("ada")
+    w.pipeline.approve_tasks(w.slug)  # the button still works either way
+    assert w.pipeline.phase(w.slug) is Phase.BUILDING
+
+
+def test_heartbeat_approval_toggle_on_the_page(w):
+    app = create_app(w.ws, github_check=lambda: GitHubStatus(True, "o"), claude_status=ClaudeCheck(True, path="/bin/claude"),
+                     chats=w.chats, pipeline=w.pipeline)
+    c = TestClient(app)
+    tasks_waiting(w)
+    page = c.get(f"/projects/{w.slug}").text
+    assert "will decide at the next heartbeat" in page and "Turn off" in page
+    c.post(f"/projects/{w.slug}/coordinator-decides", data={"on": "no"})
+    assert not w.pipeline.coordinator_decides(w.slug)
+    page = c.get(f"/projects/{w.slug}").text
+    assert "won't approve them for you" in page and "Turn on" in page
+    assert "Approve tasks and start building" in page
+    c.post(f"/projects/{w.slug}/coordinator-decides", data={"on": "yes"})
+    assert w.pipeline.coordinator_decides(w.slug)
+
+
 def test_check_now_does_not_ask_for_a_decision_early(w):
     tasks_waiting(w)
     turns = len(w.procs["ada"])

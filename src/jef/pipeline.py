@@ -8,6 +8,7 @@ project's files, so there's no hidden state:
     Planning       the coordinator turns research.md into tasks.md
     Approval       you look at the tasks and approve them (or ask for changes);
                    if you haven't by the next heartbeat, the coordinator decides
+                   (unless that's turned off for the project)
     Building       one implementer per task, each on its own branch, opens a PR
     Done           every task's PR is merged
 
@@ -219,6 +220,17 @@ class Pipeline:
             raise PipelineError("Pick a heartbeat between 5 minutes and 24 hours.")
         set_goal_field(self.workspace, slug, "Heartbeat", f"{minutes} minutes")
 
+    def coordinator_decides(self, slug: str) -> bool:
+        """Whether the coordinator approves or revises a waiting task list at
+        the heartbeat. On unless goal.md says ``Coordinator decides: no``."""
+        return goal_fields(self.workspace, slug).get("coordinator decides", "").lower() != "no"
+
+    def set_coordinator_decides(self, slug: str, on: bool) -> None:
+        set_goal_field(self.workspace, slug, "Coordinator decides", "yes" if on else "no")
+        if on:
+            # Turning it on gives you a full interval before the coordinator is asked.
+            self._last_beat[slug] = self.now()
+
     def phase(self, slug: str) -> Phase:
         fields = goal_fields(self.workspace, slug)
         if fields.get("done", "").lower() == "yes":
@@ -338,8 +350,11 @@ class Pipeline:
             elif ACTION_APPROVE_TASKS.search(reply.text) and phase is Phase.APPROVAL:
                 # The phase is from before this reply, so a list proposed and
                 # approved in one go is never approved: it waits at least once.
-                self.approve_tasks(slug)
-                agent.note = "Approved the tasks"
+                if self.coordinator_decides(slug):
+                    self.approve_tasks(slug)
+                    agent.note = "Approved the tasks"
+                else:
+                    agent.note = "Tried to approve the tasks, but that's turned off: approve them yourself"
         elif agent.role is Role.RESEARCH:
             findings = without_markers(reply.text)
             if findings and goal_fields(self.workspace, slug).get("research", "").lower() == "started":
@@ -416,6 +431,8 @@ class Pipeline:
 
     def _ask_for_decision(self, slug: str) -> None:
         """Once per heartbeat while the tasks wait, ask the coordinator to decide."""
+        if not self.coordinator_decides(slug):
+            return  # turned off on the project page: only you approve
         now = self.now()
         # After a restart, wait a full interval rather than asking at once.
         self._last_beat.setdefault(slug, now)

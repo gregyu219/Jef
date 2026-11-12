@@ -64,7 +64,7 @@ Jef has four levels. Each one hands work to the level below it and keeps track o
 
 1. **Tell Jef what you want.** Jef adds it to your backlog as *Waiting*. Nothing starts until you confirm, because every running project spends tokens.
 2. **Confirm and connect GitHub.** Jef asks which GitHub repo the code goes to and which account commits it, then creates a named project coordinator.
-3. **Research.** The coordinator runs one research agent, which writes `research.md`. The coordinator turns that into `tasks.md` for you to approve. If you haven't approved it by the next heartbeat, the coordinator decides: it approves the list or revises it.
+3. **Research.** The coordinator runs one research agent, which writes `research.md`. The coordinator turns that into `tasks.md` for you to approve. If you haven't approved it by the next heartbeat, the coordinator decides: it approves the list or revises it. You can turn that off per project.
 4. **Build.** The coordinator spins up one implementation agent per task and heartbeats it until it opens a PR.
 5. **Review.** You review each PR on GitHub and merge it. If one misses the point, chat with its coordinator by name and it will revise the work or start over.
 
@@ -80,7 +80,7 @@ Every task in a project's status table is in one of five states:
 
 Jef's heartbeat runs in the background while Jef is running. Every few seconds it acts on replies agents have finished: it saves research, records the task list, and notes PRs and stuck agents. It also starts the next task's implementer when it's that task's turn.
 
-Once per heartbeat interval (an hour by default; change it on the project page), it nudges implementers that are still working. While a task list waits for your approval, it asks the coordinator to decide once per interval, starting one full interval after the list was proposed: the coordinator either approves the list or sends a revised one (which restarts the wait). You can still approve by hand at any time. It checks GitHub for merged PRs every five minutes.
+Once per heartbeat interval (an hour by default; change it on the project page), it nudges implementers that are still working. While a task list waits for your approval, it asks the coordinator to decide once per interval, starting one full interval after the list was proposed: the coordinator either approves the list or sends a revised one (which restarts the wait). You can still approve by hand at any time. To approve every list yourself, turn the coordinator's heartbeat approval off on the project page (it's on by default, and saved as `Coordinator decides: no` in `goal.md`); while it's off, the coordinator isn't asked and Jef ignores its `ACTION: approve-tasks`. It checks GitHub for merged PRs every five minutes.
 
 Don't want to wait? The project page has a **Check status now** button that does the same checks straight away: it reads finished replies, asks GitHub about PRs waiting for review, and starts the next task. It doesn't nudge agents, so it costs no tokens.
 

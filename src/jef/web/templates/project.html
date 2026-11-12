@@ -25,7 +25,7 @@
     {% elif phase == phases.PLANNING %}
     <p class="next">{{ project.coordinator }} is turning the research into tasks.</p>
     {% elif phase == phases.APPROVAL %}
-    <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them. If you don't, {{ project.coordinator }} will decide at the next heartbeat (every {{ heartbeat }} minutes). Each task becomes one PR, {{ at_once }} at a time: the next starts after you merge the last.</p>
+    <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them.{% if coordinator_decides %} If you don't, {{ project.coordinator }} will decide at the next heartbeat (every {{ heartbeat }} minutes).{% else %} {{ project.coordinator }} won't approve them for you: that's turned off under Heartbeat below.{% endif %} Each task becomes one PR, {{ at_once }} at a time: the next starts after you merge the last.</p>
     <form method="post" action="/projects/{{ project.slug }}/approve"><button type="submit">Approve tasks and start building</button></form>
     {% elif phase == phases.BUILDING %}
     <p class="next">Implementers are building. Review and merge each PR on GitHub; Jef notices merges within five minutes and starts the next task, or press Check status now.</p>
@@ -124,6 +124,11 @@
     <form method="post" action="/projects/{{ project.slug }}/heartbeat">
       <label>Every <input type="number" name="minutes" value="{{ heartbeat }}" min="5" max="1440" class="minutes"> minutes</label>
       <button type="submit" class="secondary">Save</button>
+    </form>
+    <p class="hint">{% if coordinator_decides %}If a task list waits a whole heartbeat without your approval, {{ project.coordinator }} decides: approves it or revises it.{% else %}{{ project.coordinator }} doesn't approve task lists at the heartbeat. Only you do, with the button.{% endif %}</p>
+    <form method="post" action="/projects/{{ project.slug }}/coordinator-decides">
+      <input type="hidden" name="on" value="{{ 'no' if coordinator_decides else 'yes' }}">
+      <button type="submit" class="secondary">{{ "Turn off" if coordinator_decides else "Turn on" }} {{ project.coordinator }}'s heartbeat approval</button>
     </form>
   </section>
 {% endblock %}
