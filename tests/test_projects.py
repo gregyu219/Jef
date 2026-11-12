@@ -144,6 +144,14 @@ def test_start_opens_the_project_page_and_chat(env, client):
     assert "still working on the last message" in busy
 
 
+def test_chat_scrolls_and_keeps_its_place(env, client):
+    page = client.post("/backlog/1/start", data={"repo": "gregyu219/Jef", "confirm": "yes"}).text
+    assert 'class="chat"' in page
+    assert "overflow-y: auto" in page  # the chat is its own scrolling box
+    assert "c.scrollHeight" in page  # opens at the newest message
+    assert "sessionStorage" in page  # and remembers your place across refreshes
+
+
 def test_stop_from_the_web(env, client):
     ws, chats, clone, procs, clones = env
     client.post("/backlog/1/start", data={"repo": "gregyu219/Jef", "confirm": "yes"})
