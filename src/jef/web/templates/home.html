@@ -34,10 +34,10 @@
   </section>
   <section id="backlog">
     <h2>Backlog</h2>
-    <p class="hint">Everything you've asked for. Nothing starts until you press Start and confirm.</p>
+    <p class="hint">Everything you've asked for. Nothing starts until you press Start and confirm. With Auto approve on, Jef approves the item's task list by itself as soon as its coordinator posts it, so building starts without you.</p>
     {% if backlog %}
     <table>
-      <thead><tr><th>#</th><th>Feature</th><th>Status</th><th>Coordinator</th><th></th></tr></thead>
+      <thead><tr><th>#</th><th>Feature</th><th>Status</th><th>Coordinator</th><th title="Jef approves the task list by itself as soon as the coordinator posts it">Auto approve</th><th></th></tr></thead>
       <tbody>
       {% for item in backlog %}
         <tr>
@@ -54,6 +54,16 @@
             {% if item.status == waiting %}<a class="start" href="/backlog/{{ item.number }}/start">Start…</a>
             {% elif item.coordinator in coordinator_pages %}<a href="/projects/{{ coordinator_pages[item.coordinator] }}">{{ item.coordinator }}</a>
             {% else %}{{ item.coordinator or "—" }}{% endif %}
+          </td>
+          <td>
+            {% set on, changeable = auto_approve.get(item.number, (item.auto_approve, false)) %}
+            {% if changeable %}
+            <form method="post" action="/backlog/{{ item.number }}/auto-approve" class="inline">
+              <input type="hidden" name="on" value="{{ 'no' if on else 'yes' }}">
+              <button type="submit" class="{{ '' if on else 'secondary ' }}small" aria-pressed="{{ 'true' if on else 'false' }}"
+                      aria-label="Turn {{ 'off' if on else 'on' }} auto approve for backlog item {{ item.number }}">{{ "On" if on else "Off" }}</button>
+            </form>
+            {% else %}<span class="hint">{{ "On" if on else "Off" }}</span>{% endif %}
           </td>
           <td>
             {% if item.number in item_projects %}{% set question = "Delete “" ~ item.feature ~ "” and its project? " ~ project_delete_note %}

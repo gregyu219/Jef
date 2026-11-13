@@ -165,6 +165,94 @@ def test_home_page_shows_delete_for_items_in_every_state(ws, client):
     assert "Delete “Dark mode” from the backlog?" in page.replace("\\u201c", "“").replace("\\u201d", "”")
 
 
+def link_todo_project(ws, extra=""):
+    """A project for backlog item #1 (todo-app), with optional goal.md fields."""
+    make_status_project(ws, "todo-app")
+    goal = ws.project_dir("todo-app") / "goal.md"
+    goal.write_text(goal.read_text().replace("- Repo:", "- Backlog item: #1\n" + extra + "- Repo:"))
+    return goal
+
+
+def test_auto_approve_toggle_turns_on_a_waiting_item(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    page = client.get("/").text
+    assert 'action="/backlog/2/auto-approve"' in page
+    assert "Turn on auto approve for backlog item 2" in page
+
+    page = client.post("/backlog/2/auto-approve", data={"on": "yes"})
+
+    assert page.status_code == 200
+    assert Backlog.load(ws.backlog_file).items[1].auto_approve is True
+    assert "Turn off auto approve for backlog item 2" in page.text
+
+    client.post("/backlog/2/auto-approve", data={"on": "no"})
+    assert Backlog.load(ws.backlog_file).items[1].auto_approve is False
+
+
+def test_auto_approve_toggle_on_a_started_item_changes_its_goal(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    goal = link_todo_project(ws)
+
+    client.post("/backlog/1/auto-approve", data={"on": "yes"})
+
+    assert "- Auto approve: yes" in goal.read_text()
+    assert Backlog.load(ws.backlog_file).items[0].auto_approve is True
+    assert read_status(ws, "todo-app")["auto approve"] == "on"
+
+    client.post("/backlog/1/auto-approve", data={"on": "no"})
+    assert "- Auto approve: no" in goal.read_text()
+    assert Backlog.load(ws.backlog_file).items[0].auto_approve is False
+
+
+def test_auto_approve_toggle_uses_the_pipeline_when_there_is_one(ws):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    link_todo_project(ws)
+    calls = []
+
+    class FakePipeline:
+        def set_auto_approve(self, slug, on):
+            calls.append((slug, on))
+
+        def write_status(self, slug):
+            calls.append(slug)
+
+    client = TestClient(create_app(ws, github_check=lambda: GitHubStatus(True, "o"), pipeline=FakePipeline()))
+    client.post("/backlog/1/auto-approve", data={"on": "yes"})
+    assert calls == [("todo-app", True), "todo-app"]
+    assert Backlog.load(ws.backlog_file).items[0].auto_approve is True
+
+
+def test_home_page_reads_a_started_items_auto_approve_from_its_goal(ws, client):
+    # The backlog row says off, but goal.md is the source of truth.
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(STARTED_AND_WAITING)
+    link_todo_project(ws, "- Auto approve: yes\n")
+    assert "Turn off auto approve for backlog item 1" in client.get("/").text
+
+
+def test_auto_approve_cant_be_changed_once_done_or_building(ws, client):
+    ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
+    ws.backlog_file.write_text(WITH_DONE)
+    link_todo_project(ws, "- Tasks approved: yes\n")
+    (ws.project_dir("todo-app") / "tasks.md").write_text(
+        "# Tasks: To-do list app\n\n| # | Task | Status | Agent | PR |\n| --- | --- | --- | --- | --- |\n"
+        "| 1 | Set up | Implementation | impl-1 | |\n"
+    )
+    page = client.get("/").text
+    assert 'action="/backlog/2/auto-approve"' in page  # Waiting: still changeable
+    assert 'action="/backlog/1/auto-approve"' not in page  # Building
+    assert 'action="/backlog/3/auto-approve"' not in page  # Done
+
+
+def test_auto_approve_toggle_for_a_missing_item_goes_home(ws, client):
+    response = client.post("/backlog/9/auto-approve", data={"on": "yes"})
+    assert response.status_code == 200
+    assert not ws.backlog_file.exists()
+
+
 def test_backlog_shows_needs_you_with_a_link_to_the_pr(ws, client):
     ws.backlog_file.parent.mkdir(parents=True, exist_ok=True)
     ws.backlog_file.write_text(WITH_DONE + "| 4 | Export | In progress | Bea |\n")
