@@ -30,4 +30,36 @@
     <p><span class="missing">GitHub CLI not found.</span> Install it from cli.github.com, run <code>gh auth login</code>, then reload this page.</p>
     {% endif %}
   </section>
+
+  <section id="telegram">
+    <h2>Telegram</h2>
+    <p class="hint">Use Jef from Telegram while this computer runs it. Jef asks Telegram for new messages itself, so nothing here is opened to the internet. The bot only ever answers you. Telegram messages aren't end-to-end encrypted, so your project details pass through Telegram's servers.</p>
+    {% if telegram is none %}
+    <p><span class="missing">Not set up.</span></p>
+    <ol class="hint">
+      <li>In Telegram, message <strong>@BotFather</strong>, send <code>/newbot</code> and follow its steps.</li>
+      <li>Paste the token it gives you here. Jef keeps it in a file only you can read, outside its folder, so no agent sees it, and never shows it again.</li>
+    </ol>
+    <form method="post" action="/settings/telegram">
+      <input type="password" name="token" placeholder="Bot token from @BotFather" aria-label="Bot token" autocomplete="off" spellcheck="false">
+      <button type="submit">Save</button>
+    </form>
+    {% elif telegram.paired %}
+    <p><span class="ok">Linked</span>{% if telegram.username %} to <strong>@{{ telegram.username }}</strong>{% endif %}. It answers only your chat. Send it <code>/help</code> to see what it can do.</p>
+    {% else %}
+    <p><span class="missing">Waiting for you to link it.</span>{% if telegram.username %} The bot is <strong>@{{ telegram.username }}</strong>.{% endif %}</p>
+    <p>Send the bot this message from your own Telegram account:</p>
+    <pre class="help">/start {{ telegram.pairing_code }}</pre>
+    {% if telegram.username %}<p><a href="https://t.me/{{ telegram.username }}?start={{ telegram.pairing_code }}" target="_blank" rel="noopener">Open the bot in Telegram</a> and press Start.</p>{% endif %}
+    <p class="hint">The first chat to send the code becomes the only one the bot answers. Reload this page once you've sent it. Jef must be running for the bot to answer.</p>
+    {% endif %}
+    {% if telegram is not none %}
+    <form method="post" action="/settings/telegram/forget" onsubmit="return confirm('Forget this Telegram bot? It stops answering until you save a token again.')">
+      <button type="submit" class="secondary">Forget this bot</button>
+    </form>
+    {% endif %}
+    {% if notice == "telegram-saved" %}<p class="notice">Token saved and checked with Telegram.</p>{% endif %}
+    {% if notice == "telegram-forgotten" %}<p class="notice">Forgot the bot. Its token is gone from this computer.</p>{% endif %}
+    {% if telegram_error %}<p class="error">{{ telegram_error }}</p>{% endif %}
+  </section>
 {% endblock %}

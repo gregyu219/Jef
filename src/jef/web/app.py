@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -11,7 +12,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from jef import actions, claude, jefchat, models
+from jef import actions, claude, jefchat, models, telegram
 from jef.actions import ActionError, ProjectSummary, split_coordinator  # noqa: F401  (still importable from here)
 from jef.backlog import Backlog, BacklogStatus
 from jef.chats import Chats, ChatError, Role, Status, load_roster
@@ -96,8 +97,14 @@ def create_app(
     jef_chats: Chats | None = None,
     on_agents_ready: Callable[[Pipeline], None] | None = None,
     runtime: Runtime | None = None,
+    telegram_path: Path | None = None,
+    telegram_opener: Callable = urllib.request.urlopen,
 ) -> FastAPI:
     """``claude_status`` is the result of the check ``jef`` ran on startup, if any.
+
+    ``telegram_path`` is where the Telegram bot's settings are kept (by
+    default ``telegram.config_path()``, outside the workspace);
+    ``telegram_opener`` stands in for ``urlopen`` in tests.
 
     Pass a ``runtime`` to share its chats and pipeline with Jef's background
     threads; otherwise one is made from ``claude_status``, ``chats``,
@@ -464,8 +471,13 @@ def create_app(
                 pass
         return RedirectResponse(f"/projects/{slug}", status_code=303)
 
-    @app.get("/settings", response_class=HTMLResponse)
-    def settings(request: Request, notice: str = "", error: str = ""):
+    def telegram_file() -> Path:
+        return telegram_path or telegram.config_path()
+
+    def settings_page(request: Request, notice: str = "", error: str = "", telegram_error: str = ""):
+        config = telegram.load_config(telegram_file())
+        if config is not None and not config.token:
+            config = None
         return TEMPLATES.TemplateResponse(
             request,
             "settings.html",
@@ -475,8 +487,33 @@ def create_app(
                 "github": github_check(),
                 "notice": notice,
                 "error": error,
+                # Never the token itself: only whether there is one, and how to pair.
+                "telegram": None if config is None else {
+                    "paired": config.paired,
+                    "username": config.username,
+                    "pairing_code": "" if config.paired else config.pairing_code,
+                },
+                "telegram_error": telegram_error,
             },
+            status_code=400 if telegram_error else 200,
         )
+
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings(request: Request, notice: str = "", error: str = ""):
+        return settings_page(request, notice, error)
+
+    @app.post("/settings/telegram", response_class=HTMLResponse)
+    def save_telegram_token(request: Request, token: str = Form("")):
+        try:
+            telegram.save_token(telegram_file(), token, telegram_opener)
+        except telegram.TelegramError as err:
+            return settings_page(request, telegram_error=str(err))
+        return RedirectResponse("/settings?notice=telegram-saved#telegram", status_code=303)
+
+    @app.post("/settings/telegram/forget")
+    def forget_telegram():
+        telegram.forget_config(telegram_file())
+        return RedirectResponse("/settings?notice=telegram-forgotten#telegram", status_code=303)
 
     @app.post("/settings/claude-check")
     def check_claude_again():

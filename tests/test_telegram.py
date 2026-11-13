@@ -165,7 +165,7 @@ def test_does_nothing_without_a_token(env):
 
 def test_pairing_with_the_code_makes_you_the_owner(env):
     _, path, fake, link = env
-    config = TelegramConfig.new(TOKEN)
+    config = TelegramConfig.new(TOKEN, username="JefBot")
     telegram.save_config(path, config)
     say(env, "/start", "/start wrong-code", chat_id=STRANGER)
     assert fake.texts(STRANGER) == [telegram.UNPAIRED, telegram.UNPAIRED]
@@ -174,12 +174,32 @@ def test_pairing_with_the_code_makes_you_the_owner(env):
     say(env, f"/start {config.pairing_code}", "/status")
     saved = telegram.load_config(path)
     assert saved.chat_id == OWNER and saved.pairing_code == ""
+    assert saved.token == TOKEN and saved.username == "JefBot"  # kept for the Settings page
     assert fake.texts() == [telegram.PAIRED, "No projects yet. Add one to the backlog in Jef, then start it."]
 
     # The code is used up, and nobody else is answered from now on.
     say(env, f"/start {config.pairing_code}", "/status", chat_id=STRANGER)
     assert fake.texts(STRANGER)[-2:] == [telegram.PRIVATE, telegram.PRIVATE]
     assert telegram.load_config(path).chat_id == OWNER
+
+
+def test_saving_a_new_token_starts_a_new_bot_afresh(env):
+    _, path, fake, link = env
+    paired(env)
+    link._save_state({"offset": 900})
+    config = telegram.save_token(path, f"  {TOKEN}  ", opener=fake)
+    assert fake.calls[-1][0] == "getMe"
+    assert config.username == "JefBot" and config.pairing_code and not config.paired
+    assert telegram.load_config(path) == config
+    assert link._load_state() == {}  # the old bot's offset would skip the new bot's messages
+
+
+def test_save_token_refuses_what_isnt_a_token(env):
+    _, path, fake, _ = env
+    for bad in ("", "  ", "12 34", "a/b"):
+        with pytest.raises(TelegramError):
+            telegram.save_token(path, bad, opener=fake)
+    assert fake.calls == [] and not path.exists()
 
 
 def test_pairing_only_from_a_private_chat(env):

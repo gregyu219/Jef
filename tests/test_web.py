@@ -1,6 +1,12 @@
+import io
+import json
+import stat
+import urllib.error
+
 import pytest
 from fastapi.testclient import TestClient
 
+from jef import telegram
 from jef.backlog import Backlog
 from jef.chats import Agent, Role, Status, save_roster
 from jef.github import GitHubStatus
@@ -8,6 +14,13 @@ from jef.claude import ClaudeCheck
 from jef.status import read_status
 from jef.web.app import create_app, split_coordinator
 from jef.workspace import Workspace
+
+@pytest.fixture(autouse=True)
+def private_secrets(tmp_path, monkeypatch):
+    """Never read or write the real Telegram settings."""
+    monkeypatch.setenv("JEF_SECRETS", str(tmp_path / "secrets"))
+    return tmp_path / "secrets"
+
 
 @pytest.fixture
 def ws(tmp_path):
@@ -448,3 +461,95 @@ def test_agents_start_once_check_again_works(ws):
     c.post("/settings/claude-check")
     assert len(ready) == 1  # only once
     assert "Claude Code isn't working" not in c.get("/").text
+
+
+# --- Telegram ----------------------------------------------------------------
+
+TOKEN = "123456:test-token-not-real"
+
+
+class FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def telegram_opener(calls, ok=True):
+    """Stands in for urlopen: getMe says the bot is @JefBot, or 401 if not ``ok``."""
+
+    def opener(request, timeout=None):
+        calls.append(request.full_url.rsplit("/", 1)[1])
+        if not ok:
+            body = io.BytesIO(json.dumps({"ok": False, "description": "Unauthorized"}).encode())
+            raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, body)
+        return FakeResponse(json.dumps({"ok": True, "result": {"username": "JefBot"}}).encode())
+
+    return opener
+
+
+def telegram_client(ws, path, calls, ok=True):
+    app = create_app(
+        ws,
+        github_check=lambda: GitHubStatus(True, "o"),
+        telegram_path=path,
+        telegram_opener=telegram_opener(calls, ok),
+    )
+    return TestClient(app)
+
+
+def test_settings_explains_how_to_set_up_telegram(ws, tmp_path):
+    page = telegram_client(ws, tmp_path / "s" / "telegram.json", []).get("/settings").text
+    assert "Not set up." in page and "@BotFather" in page
+    assert 'action="/settings/telegram"' in page and "Forget this bot" not in page
+
+
+def test_saving_a_token_checks_it_and_shows_the_pairing_code(ws, tmp_path):
+    path, calls = tmp_path / "s" / "telegram.json", []
+    page = telegram_client(ws, path, calls).post("/settings/telegram", data={"token": f" {TOKEN}\n"}).text
+    assert calls == ["getMe"]
+    config = telegram.load_config(path)
+    assert config.token == TOKEN and not config.paired and config.username == "JefBot"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert "Token saved" in page and "@JefBot" in page
+    assert f"/start {config.pairing_code}" in page
+    assert f"https://t.me/JefBot?start={config.pairing_code}" in page
+    assert TOKEN not in page and "test-token" not in page  # never shown again
+
+
+def test_a_bad_token_is_refused_and_not_saved(ws, tmp_path):
+    path, calls = tmp_path / "s" / "telegram.json", []
+    c = telegram_client(ws, path, calls, ok=False)
+    response = c.post("/settings/telegram", data={"token": TOKEN})
+    assert response.status_code == 400
+    assert "Unauthorized" in response.text and TOKEN not in response.text
+    assert not path.exists()
+    response = c.post("/settings/telegram", data={"token": "   "})
+    assert "look like a bot token" in response.text and len(calls) == 1  # not even sent
+
+
+def test_settings_shows_a_linked_bot_without_its_code_or_token(ws, tmp_path):
+    path = tmp_path / "s" / "telegram.json"
+    config = telegram.TelegramConfig(token=TOKEN, chat_id=111, pairing_code="abc123", username="JefBot")
+    telegram.save_config(path, config)
+    page = telegram_client(ws, path, []).get("/settings").text
+    assert "Linked" in page and "@JefBot" in page
+    assert "abc123" not in page and TOKEN not in page
+    assert "Forget this bot" in page
+
+
+def test_forgetting_the_bot_removes_its_token_and_state(ws, tmp_path):
+    path = tmp_path / "s" / "telegram.json"
+    telegram.save_config(path, telegram.TelegramConfig(token=TOKEN, chat_id=111))
+    state = path.with_name(telegram.STATE_FILE)
+    state.write_text('{"offset": 5}')
+    page = telegram_client(ws, path, []).post("/settings/telegram/forget").text
+    assert not path.exists() and not state.exists()
+    assert "Forgot the bot" in page and "Not set up." in page
+
+
+def test_settings_uses_the_secrets_folder_by_default(ws, private_secrets):
+    app = create_app(ws, github_check=lambda: GitHubStatus(True, "o"), telegram_opener=telegram_opener([]))
+    TestClient(app).post("/settings/telegram", data={"token": TOKEN})
+    assert telegram.load_config(private_secrets / "telegram.json").token == TOKEN
