@@ -13,9 +13,10 @@ The bot's token is a secret, so its settings live outside the workspace
 
 Commands call the same functions the web app does (``jef.actions``), so
 Jef's rules hold whichever way you ask. A plain message goes to Jef's front
-desk chat (a Claude Code turn, the same as the home page's chat), and its
-answer is sent back once the turn ends. Nothing else here calls Claude, and
-nothing calls GitHub.
+desk chat (a Claude Code turn, the same as the home page's chat), or, after
+``/to <coordinator>``, to that coordinator (like the project page's message
+box). Its answer is sent back once the turn ends. ``/approve``, ``/wake`` and
+``/retry`` press the project page's buttons. Nothing calls GitHub.
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ from typing import Any, Callable
 from jef import actions, jefchat
 from jef.backlog import Backlog, BacklogStatus
 from jef.chats import ChatError, Chats, Reply, Status
+from jef.pipeline import PipelineError
+from jef.projects import Project
 
 log = logging.getLogger(__name__)
 
@@ -57,18 +60,40 @@ UNPAIRED = (
 PAIRED = "Linked. This chat is now the only one this bot answers. Send /help to see what it can do."
 HELP = """Jef on Telegram. You can send:
 
-Any message  chat with Jef, the front desk; its answer comes back here
+Any message  chat with Jef, the front desk (or the coordinator you picked with /to); the answer comes back here
+/to <coordinator>  talk to a project's coordinator, like /to Radia; /to jef goes back to Jef
+/to <coordinator> <message>  send one message to a coordinator
+/approve <coordinator>  approve the tasks it proposed
+/wake <coordinator>  ask it to check on its project now
+/retry <coordinator>  clear the problem that stopped its project and try again
 /reset  start the chat with Jef over
 /add <feature>  add something to the backlog
 /status  how each project is doing
 /backlog  everything you've asked for, and what needs you
-/help  this list"""
+/help  this list
+
+With /to set, /approve, /wake and /retry can leave out the name."""
 JEF_BUSY = "Jef is still answering your last message. Try again when it's done."
 RESET = "Starting Jef over. It'll say hello here in a moment."
 ADD_USAGE = "Say what you'd like, like this: /add Dark mode for the settings page"
 WATCH_POLL_SECONDS = 3  # how long getUpdates waits while a reply is due
 NO_REPLY = "{label}'s turn ended without a reply."
 FAILED_REPLY = "{label}'s turn failed: {text}"
+JEF_NAME = "jef"  # /to jef: back to the front desk
+TALKING_TO = "Now talking to {name}. Your messages go to {name} until you send /to jef."
+BACK_TO_JEF = "Back to Jef. Your messages go to Jef, the front desk."
+TO_USAGE = "Say who, like this: /to Radia (or /to Radia <message> for one message)."
+NO_COORDINATORS = "There are no coordinators yet. Start a project from the backlog first."
+COORDINATOR_BUSY = "{name} is still working. Try again when it's done."
+COORDINATOR_GONE = "{name} isn't around any more (its project may have been deleted). Your messages go to Jef again."
+PICK_COORDINATOR = "Say which coordinator, like this: /{command} {example}"
+DONE = {
+    "approve": "Approved {name}'s tasks.",
+    "wake": "Asked {name} to check on the project now.",
+    "retry": "Cleared the problem in {name}'s project. Jef is trying again.",
+}
+NOTHING_TO_RETRY = "Nothing has stopped {name}'s project, so there's nothing to try again."
+ANSWER_COMING = " {name}'s answer will come here."
 
 
 # --- Settings ----------------------------------------------------------------
@@ -368,7 +393,8 @@ class TelegramLink:
     def workspace(self):
         return self.runtime.workspace
 
-    # The offset, kept so a restart doesn't answer old messages again.
+    # The offset, kept so a restart doesn't answer old messages again, and
+    # which coordinator /to picked, so a restart doesn't forget it.
 
     def _load_state(self) -> dict:
         try:
@@ -379,6 +405,21 @@ class TelegramLink:
 
     def _save_state(self, state: dict) -> None:
         _write_private(self.state_path, json.dumps(state, indent=2) + "\n")
+
+    def _update_state(self, **changes) -> None:
+        """Change some keys (None removes one), keeping the rest as saved."""
+        state = self._load_state()
+        for key, value in changes.items():
+            if value is None:
+                state.pop(key, None)
+            else:
+                state[key] = value
+        self._save_state(state)
+
+    def talking_to(self) -> str:
+        """The coordinator plain messages go to, or "" for Jef."""
+        name = self._load_state().get("talking_to")
+        return name if isinstance(name, str) else ""
 
     def bot_for(self, config: TelegramConfig) -> Bot:
         if self._bot is None or self._bot.token != config.token:
@@ -412,8 +453,7 @@ class TelegramLink:
             except Exception:  # one bad message mustn't stop the bot
                 log.exception("Telegram: couldn't handle an update")
             if isinstance(update_id, int):
-                state["offset"] = update_id + 1
-                self._save_state(state)
+                self._update_state(offset=update_id + 1)
         try:
             self.send_replies(bot, config)
         except TelegramError as err:
@@ -521,9 +561,113 @@ class TelegramLink:
             return self.add(rest)
         if command == "reset":
             return self.reset_jef()
+        if command == "to":
+            return self.talk_to(rest)
+        if command in DONE:
+            return self.coordinator_action(command, rest)
         if command:
             return f"I don't know /{command}. Send /help to see what works."
-        return self.message_jef(rest)
+        target = self.talking_to()
+        if not target:
+            return self.message_jef(rest)
+        project = actions.find_coordinator(self.workspace, target)
+        if project is None:
+            self._update_state(talking_to=None)
+            return COORDINATOR_GONE.format(name=target)
+        return self.message_coordinator(project, rest)
+
+    # Coordinators.
+
+    def coordinator_list(self) -> str:
+        names = sorted(actions.coordinators(self.workspace), key=str.casefold)
+        return "Coordinators: " + ", ".join(names) + "." if names else NO_COORDINATORS
+
+    def talk_to(self, rest: str) -> str:
+        """/to <name> picks who plain messages go to; /to <name> <message>
+        sends just that one; /to on its own says who it is now."""
+        name, _, text = rest.partition(" ")
+        text = text.strip()
+        if not name:
+            current = self.talking_to() or "Jef"
+            return f"You're talking to {current}. {TO_USAGE}\n{self.coordinator_list()}"
+        if name.casefold() == JEF_NAME:
+            if text:
+                return self.message_jef(text)
+            self._update_state(talking_to=None)
+            return BACK_TO_JEF
+        project = actions.find_coordinator(self.workspace, name)
+        if project is None:
+            return f"There's no coordinator called {name}. {self.coordinator_list()}"
+        if text:
+            return self.message_coordinator(project, text)
+        self._update_state(talking_to=project.coordinator)
+        return TALKING_TO.format(name=project.coordinator)
+
+    def message_coordinator(self, project: Project, text: str) -> str:
+        """Pass a message to a coordinator; its reply comes back later."""
+        if not text:
+            return ""
+        runner = self.runtime.get_chats()
+        seen = len(runner.replies(project.slug, project.coordinator_agent)) if runner else 0
+        try:
+            actions.message_coordinator(self.workspace, runner, project.slug, text, sender="telegram")
+        except actions.ActionError as err:
+            return str(err)
+        except ChatError as err:
+            if actions.chat_error_reason(err) == "busy":
+                return COORDINATOR_BUSY.format(name=project.coordinator)
+            return f"Couldn't reach {project.coordinator}: {err}"
+        self.watch(runner, project.slug, project.coordinator_agent, project.coordinator, seen)
+        return ""
+
+    def _pick_coordinator(self, command: str, name: str) -> tuple[Project | None, str]:
+        """The coordinator ``name`` means: the one /to picked if it's empty,
+        or the only one there is. Otherwise (None, what to say instead)."""
+        name = name.strip() or self.talking_to()
+        if not name:
+            found = actions.coordinators(self.workspace)
+            if len(found) == 1:
+                name = next(iter(found))
+            elif not found:
+                return None, NO_COORDINATORS
+            else:
+                example = min(found, key=str.casefold)
+                return None, PICK_COORDINATOR.format(command=command, example=example) + "\n" + self.coordinator_list()
+        project = actions.find_coordinator(self.workspace, name)
+        if project is None:
+            return None, f"There's no coordinator called {name}. {self.coordinator_list()}"
+        return project, ""
+
+    def coordinator_action(self, command: str, rest: str) -> str:
+        """/approve, /wake and /retry: the project page's buttons."""
+        project, problem = self._pick_coordinator(command, rest)
+        if project is None:
+            return problem
+        flow = self.runtime.get_pipeline()
+        if flow is None:
+            return actions.NO_CLAUDE
+        slug, agent_name = project.slug, project.coordinator_agent
+        runner = flow.chats
+
+        def working() -> bool:
+            agent = next((a for a in runner.refresh(slug) if a.name == agent_name), None)
+            return agent is not None and agent.status is Status.WORKING
+
+        if command == "retry" and not flow.problem(slug):
+            return NOTHING_TO_RETRY.format(name=project.coordinator)
+        was_working = working()
+        seen = len(runner.replies(slug, agent_name))
+        run = {"approve": flow.approve_tasks, "wake": flow.wake_now, "retry": flow.clear_problem}[command]
+        try:
+            run(slug)
+        except (PipelineError, ChatError) as err:
+            return str(err)
+        said = DONE[command].format(name=project.coordinator)
+        # The action may have woken the coordinator: send its answer here too.
+        if not was_working and working():
+            self.watch(runner, slug, agent_name, project.coordinator, seen)
+            said += ANSWER_COMING.format(name=project.coordinator)
+        return said
 
     def message_jef(self, text: str) -> str:
         """Pass a plain message to Jef's front desk; its reply comes back later."""

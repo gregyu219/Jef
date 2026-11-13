@@ -262,7 +262,7 @@ def test_help_and_unknown_commands(env):
     assert texts[:3] == [telegram.HELP] * 3
     assert texts[3] == "I don't know /nope. Send /help to see what works."
     assert texts[4] == actions.NO_CLAUDE  # no Claude Code in this test, so no Jef chat
-    for command in ("/status", "/backlog", "/reset", "/add", "/help"):
+    for command in ("/status", "/backlog", "/reset", "/add", "/help", "/to", "/approve", "/wake", "/retry"):
         assert command in telegram.HELP
 
 
@@ -467,3 +467,200 @@ def test_reset_and_add_without_claude(env):
     say(env, "/reset", "/add Dark mode")
     assert fake.texts()[0] == actions.NO_CLAUDE
     assert fake.texts()[1].startswith("Added #1")  # the backlog needs no Claude
+
+
+# --- Talking to coordinators -------------------------------------------------
+
+
+class FakePipeline:
+    """The project page's buttons, recorded. ``wake_now`` starts a
+    coordinator turn, like the real one's tick does."""
+
+    def __init__(self, chats):
+        self.chats = chats
+        self.calls = []
+        self.refuse = None  # a PipelineError to raise next
+        self.problems = {}
+
+    def problem(self, slug):
+        return self.problems.get(slug, "")
+
+    def _press(self, name, slug):
+        self.calls.append((name, slug))
+        if self.refuse is not None:
+            err, self.refuse = self.refuse, None
+            raise err
+
+    def approve_tasks(self, slug):
+        self._press("approve", slug)
+
+    def clear_problem(self, slug):
+        self._press("retry", slug)
+        self.problems.pop(slug, None)
+
+    def wake_now(self, slug):
+        self._press("wake", slug)
+        project = actions.known_project(self.chats.workspace, slug)
+        self.chats.send(slug, project.coordinator_agent, "The person asked you to check on the project now.")
+
+
+def no_clone(repo, dest):
+    dest.mkdir(parents=True)
+
+
+@pytest.fixture
+def team(env):
+    """A paired link with two projects (coordinators Ada and Bob), each
+    coordinator's first turn finished, and fake Claude turns."""
+    ws, path, fake, _ = env
+    procs = []
+
+    def popen(cmd, **kwargs):
+        procs.append(FakeProc(cmd, **kwargs))
+        return procs[-1]
+
+    runner = Chats(ws, "/bin/claude", popen=popen)
+    projects = []
+    for feature, name in (("Dark mode", "Ada"), ("Weekly email", "Bob")):
+        item = actions.add_backlog_item(ws, feature)
+        project = actions.start_backlog_item(
+            ws, item.number, "gregyu219/Jef", runner, clone=no_clone, choose_name=lambda names, name=name: name
+        )
+        procs[-1].done = True
+        runner.refresh(project.slug)
+        projects.append(project)
+    flow = FakePipeline(runner)
+    link = TelegramLink(Runtime(ws, chats=runner, pipeline=flow), path=path, opener=fake, poll_seconds=0)
+    paired(env)
+    return (ws, path, fake, link), runner, procs, flow, projects
+
+
+def end_turn(runner, procs, project, text):
+    """The coordinator's latest turn ends with ``text`` as its reply."""
+    with runner.chat_file(project.slug, project.coordinator_agent).open("a") as out:
+        out.write(json.dumps({"type": "result", "result": text, "is_error": False, "subtype": "success"}) + "\n")
+    procs[-1].done = True
+
+
+def sent_to(runner, project):
+    lines = runner.chat_file(project.slug, project.coordinator_agent).read_text().splitlines()
+    return [json.loads(line) for line in lines if '"jef_sent"' in line]
+
+
+def test_to_with_a_message_sends_just_that_one(team):
+    env, runner, procs, _, (ada, bob) = team
+    _, _, fake, link = env
+    say(env, "/to ada Use the darker blue")
+    assert fake.texts() == []
+    assert sent_to(runner, ada)[-1] == {"type": "jef_sent", "from": "telegram", "text": "Use the darker blue"}
+    end_turn(runner, procs, ada, "Done, switching to navy.")
+    say(env)
+    assert fake.texts() == ["Ada: Done, switching to navy."]
+    assert link.talking_to() == ""  # one message only: plain text still goes to Jef
+    say(env, "hello")
+    assert fake.texts()[-1] == actions.NO_CLAUDE  # no Jef chat in this test
+
+
+def test_to_mode_sends_plain_messages_to_the_coordinator(team):
+    env, runner, procs, _, (ada, bob) = team
+    ws, path, fake, link = env
+    say(env, "/to Bob")
+    assert fake.texts() == [telegram.TALKING_TO.format(name="Bob")]
+    say(env, "How's the email going?")
+    assert sent_to(runner, bob)[-1]["text"] == "How's the email going?"
+    say(env, "And another thing")
+    assert fake.texts()[-1] == telegram.COORDINATOR_BUSY.format(name="Bob")
+    end_turn(runner, procs, bob, "Halfway there.")
+    say(env)
+    assert fake.texts()[-1] == "Bob: Halfway there."
+
+    # Remembered across a restart, until /to jef.
+    again = TelegramLink(link.runtime, path=path, opener=fake, poll_seconds=0)
+    assert again.talking_to() == "Bob"
+    say(env, "/to")
+    assert fake.texts()[-1].startswith("You're talking to Bob.")
+    assert fake.texts()[-1].endswith("Coordinators: Ada, Bob.")
+    say(env, "/to jef", "hi")
+    assert fake.texts()[-2:] == [telegram.BACK_TO_JEF, actions.NO_CLAUDE]
+    assert link.talking_to() == "" and isinstance(link._load_state()["offset"], int)
+
+
+def test_to_an_unknown_coordinator(team):
+    env = team[0]
+    _, _, fake, link = env
+    say(env, "/to Zed", "/to Zed hi")
+    assert fake.texts() == ["There's no coordinator called Zed. Coordinators: Ada, Bob."] * 2
+    assert link.talking_to() == ""
+
+
+def test_to_mode_ends_when_the_coordinator_is_gone(team):
+    env = team[0]
+    _, _, fake, link = env
+    link._update_state(talking_to="Carol")
+    say(env, "hi")
+    assert fake.texts() == [telegram.COORDINATOR_GONE.format(name="Carol")]
+    assert link.talking_to() == ""
+
+
+def test_coordinator_commands_need_claude(env):
+    ws, _, fake, _ = env
+    paired(env)
+    procs = []
+
+    def popen(cmd, **kwargs):
+        procs.append(FakeProc(cmd, **kwargs))
+        return procs[-1]
+
+    item = actions.add_backlog_item(ws, "Dark mode")
+    actions.start_backlog_item(ws, item.number, "a/b", Chats(ws, "/bin/claude", popen=popen), clone=no_clone, choose_name=min)
+    say(env, "/to ada hi", "/approve ada", "/wake")
+    assert fake.texts() == [actions.NO_CLAUDE] * 3
+
+
+def test_approve_wake_and_retry_press_the_buttons(team):
+    env, runner, procs, flow, (ada, bob) = team
+    _, _, fake, _ = env
+    say(env, "/approve ada")
+    assert flow.calls == [("approve", ada.slug)]
+    assert fake.texts()[-1] == "Approved Ada's tasks."
+
+    say(env, "/wake Bob")
+    assert flow.calls[-1] == ("wake", bob.slug)
+    assert fake.texts()[-1] == "Asked Bob to check on the project now. Bob's answer will come here."
+    end_turn(runner, procs, bob, "All on track.")
+    say(env)
+    assert fake.texts()[-1] == "Bob: All on track."
+
+    say(env, "/retry ada")
+    assert fake.texts()[-1] == telegram.NOTHING_TO_RETRY.format(name="Ada")
+    flow.problems[ada.slug] = "Ada is stuck: tests fail"
+    say(env, "/retry ada")
+    assert flow.calls[-1] == ("retry", ada.slug)
+    assert fake.texts()[-1] == "Cleared the problem in Ada's project. Jef is trying again."
+
+
+def test_buttons_use_the_to_coordinator_or_ask_which(team):
+    env, _, _, flow, (ada, bob) = team
+    _, _, fake, _ = env
+    say(env, "/approve")
+    assert fake.texts()[-1] == "Say which coordinator, like this: /approve Ada\nCoordinators: Ada, Bob."
+    assert flow.calls == []
+    say(env, "/to bob", "/approve")
+    assert flow.calls == [("approve", bob.slug)]
+    say(env, "/approve Zed")
+    assert fake.texts()[-1] == "There's no coordinator called Zed. Coordinators: Ada, Bob."
+
+
+def test_buttons_pass_on_why_jef_refused(team):
+    env, _, _, flow, (ada, _) = team
+    _, _, fake, _ = env
+    flow.refuse = telegram.PipelineError("There are no tasks waiting for approval.")
+    say(env, "/approve ada")
+    assert fake.texts()[-1] == "There are no tasks waiting for approval."
+
+
+def test_buttons_without_coordinators(env):
+    _, _, fake, _ = env
+    paired(env)
+    say(env, "/wake")
+    assert fake.texts()[-1] == telegram.NO_COORDINATORS
