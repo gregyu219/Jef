@@ -768,6 +768,7 @@ def test_a_plan_says_which_tasks_each_one_comes_after(w):
     ]
     assert "| 4 | Wire it up | 2, 3 | Not started |" in (w.ws.project_dir(slug) / "tasks.md").read_text()
     assert goal_fields(w.ws, slug)["dependencies"] == "yes"
+    assert read_status(w.ws, slug)["jef starts ready tasks"] == "yes"  # so the coordinator knows
     # Only earlier tasks: that keeps the list free of loops.
     assert "can't come after task 2" in w.refused("plan", titles=["A [after 2]", "B"])
     assert "can't come after task 1" in w.refused("plan", titles=["A [after 1]"])
@@ -854,6 +855,8 @@ def test_jef_leaves_older_lists_to_the_coordinator(w):
     p, slug = w.pipeline, w.slug
     ready_to_build(w, ("A", "B"), at_once=2)
     set_goal_field(w.ws, slug, "Dependencies", "")
+    p.write_status(slug)
+    assert "jef starts ready tasks" not in read_status(w.ws, slug)
     assert p.start_ready(slug) == [] and statuses(w) == [NS, NS]
     w.ok("start", number="1")
 

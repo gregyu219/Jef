@@ -150,6 +150,8 @@ def render_status(ws: Workspace, slug: str, agents: list[Agent], now: datetime |
             f"- Auto approve: {'on' if auto_approve(ws, slug) else 'off'}",
             # Tasks built on another task's unmerged branch, so the coordinator knows who to rebase.
             *([f"- Stacked: {_one_line(fields['stacked'])}"] if fields.get("stacked") else []),
+            # The list says what each task waits for, so Jef starts ready tasks itself (Pipeline.start_ready).
+            *(["- Jef starts ready tasks: yes"] if fields.get("dependencies", "").lower() == "yes" else []),
             f"{UPDATED} {stamp}",
             "",
         ]
