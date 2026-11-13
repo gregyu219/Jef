@@ -101,6 +101,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         runtime.keep(heartbeat)
 
     runtime.on_agents_ready(start_heartbeat)
+    # The Telegram link starts whether or not Claude Code works, so /status
+    # still answers. It does nothing until a token is saved in Settings.
+    from jef.telegram import TelegramLink
+
+    telegram = TelegramLink(runtime)
+    telegram.start()
+    runtime.keep(telegram)
     url = url_for(args.port)
     print(f"Jef is running at {url}  (press Ctrl+C to stop)")
     if not args.no_browser:

@@ -39,7 +39,9 @@ def make_tmux(fake, have=("tmux", "caffeinate"), env=None):
 
 
 @pytest.fixture(autouse=True)
-def no_network_or_browser(monkeypatch):
+def no_network_or_browser(monkeypatch, tmp_path):
+    # No real Telegram token: the link started by "jef run" finds none and waits.
+    monkeypatch.setenv("JEF_SECRETS", str(tmp_path / "secrets"))
     monkeypatch.setattr(cli, "is_up", lambda port: False)
     monkeypatch.setattr(cli, "wait_until_up", lambda port, seconds=15: True)
     monkeypatch.setattr(cli.webbrowser, "open", lambda url: None)
@@ -151,3 +153,24 @@ def test_run_still_starts_if_claude_code_is_not_signed_in(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Not logged in" in out and "/login" in out and "starting anyway" in out
     assert not seen["claude"].ok and seen["pipeline"] is None  # no agents, but the pages work
+
+
+def test_run_starts_the_telegram_link_and_stops_it(monkeypatch, tmp_path):
+    from jef import telegram
+
+    monkeypatch.setenv("JEF_HOME", str(tmp_path / "jef"))
+    # Even without Claude Code: /status and /backlog still answer.
+    monkeypatch.setattr(cli.claude, "check", lambda: ClaudeCheck(False, "missing"))
+
+    links = []
+    real_start = telegram.TelegramLink.start
+
+    def start(self):
+        links.append(self)
+        real_start(self)
+
+    monkeypatch.setattr(telegram.TelegramLink, "start", start)
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+    assert cli.main(["run", "--no-browser"]) == 0
+    assert len(links) == 1
+    assert links[0]._stop.is_set() and not links[0]._thread.is_alive()
