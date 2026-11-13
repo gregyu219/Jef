@@ -12,7 +12,10 @@ The bot's token is a secret, so its settings live outside the workspace
 (agents read ``~/.jef``), in a file only you can read: see ``config_path``.
 
 Commands call the same functions the web app does (``jef.actions``), so
-Jef's rules hold whichever way you ask. Nothing here calls Claude or GitHub.
+Jef's rules hold whichever way you ask. A plain message goes to Jef's front
+desk chat (a Claude Code turn, the same as the home page's chat), and its
+answer is sent back once the turn ends. Nothing else here calls Claude, and
+nothing calls GitHub.
 """
 
 from __future__ import annotations
@@ -31,8 +34,9 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from jef import actions
+from jef import actions, jefchat
 from jef.backlog import Backlog, BacklogStatus
+from jef.chats import ChatError, Chats, Reply, Status
 
 log = logging.getLogger(__name__)
 
@@ -53,10 +57,18 @@ UNPAIRED = (
 PAIRED = "Linked. This chat is now the only one this bot answers. Send /help to see what it can do."
 HELP = """Jef on Telegram. You can send:
 
+Any message  chat with Jef, the front desk; its answer comes back here
+/reset  start the chat with Jef over
+/add <feature>  add something to the backlog
 /status  how each project is doing
 /backlog  everything you've asked for, and what needs you
 /help  this list"""
-NOT_YET = "Chatting with Jef from here isn't ready yet. Send /help to see what works."
+JEF_BUSY = "Jef is still answering your last message. Try again when it's done."
+RESET = "Starting Jef over. It'll say hello here in a moment."
+ADD_USAGE = "Say what you'd like, like this: /add Dark mode for the settings page"
+WATCH_POLL_SECONDS = 3  # how long getUpdates waits while a reply is due
+NO_REPLY = "{label}'s turn ended without a reply."
+FAILED_REPLY = "{label}'s turn failed: {text}"
 
 
 # --- Settings ----------------------------------------------------------------
@@ -283,6 +295,30 @@ def backlog_text(ws) -> str:
     return "\n".join(lines)
 
 
+def reply_text(label: str, reply: Reply) -> str:
+    """How an agent's finished turn reads on Telegram: "Jef: ..."."""
+    if reply.is_error:
+        if "budget" in reply.subtype:
+            return FAILED_REPLY.format(label=label, text="it used up the rest of the budget.")
+        return FAILED_REPLY.format(label=label, text=reply.text or reply.subtype or "no reason given.")
+    return f"{label}: {reply.text.strip() or '(no text)'}"
+
+
+@dataclass
+class Watch:
+    """A message sent from Telegram whose answer should be sent back: the
+    agent's chat, and how many replies it had before the message."""
+
+    chats: Chats
+    project: str
+    name: str
+    label: str  # who it is, as the person knows it: "Jef", "Radia"
+    seen: int
+
+    def same_agent(self, other: "Watch") -> bool:
+        return self.chats is other.chats and (self.project, self.name) == (other.project, other.name)
+
+
 def parse_command(text: str) -> tuple[str, str]:
     """"/Status@JefBot now" -> ("status", "now"); plain text -> ("", text)."""
     text = text.strip()
@@ -315,6 +351,9 @@ class TelegramLink:
         self.poll_seconds = poll_seconds
         self._bot: Bot | None = None
         self._failures = 0
+        # Answers still due. Only this thread touches them. Kept in memory
+        # only: when Jef stops, the turns they wait on are ended too.
+        self._watches: list[Watch] = []
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="jef-telegram", daemon=True)
 
@@ -355,8 +394,11 @@ class TelegramLink:
         bot = self.bot_for(config)
         state = self._load_state()
         offset = state.get("offset") if isinstance(state.get("offset"), int) else None
+        # While an answer is due, ask Telegram often, so the answer isn't held
+        # back by a long wait for news.
+        timeout = min(self.poll_seconds, WATCH_POLL_SECONDS) if self._watches else self.poll_seconds
         try:
-            updates = bot.get_updates(offset, timeout=self.poll_seconds)
+            updates = bot.get_updates(offset, timeout=timeout)
         except TelegramError as err:
             wait = BACKOFF_SECONDS[min(self._failures, len(BACKOFF_SECONDS) - 1)]
             self._failures += 1
@@ -372,7 +414,53 @@ class TelegramLink:
             if isinstance(update_id, int):
                 state["offset"] = update_id + 1
                 self._save_state(state)
+        try:
+            self.send_replies(bot, config)
+        except TelegramError as err:
+            log.warning("Telegram: couldn't send a reply: %s", err)
         return 0
+
+    # Answers to messages sent from here.
+
+    def watch(self, chats: Chats, project: str, name: str, label: str, seen: int | None = None) -> None:
+        """Send the agent's next reply here once its turn ends. ``seen`` is
+        how many replies it already had (by default, how many it has now)."""
+        if seen is None:
+            seen = len(chats.replies(project, name))
+        new = Watch(chats, project, name, label, seen)
+        self._watches = [w for w in self._watches if not w.same_agent(new)] + [new]
+
+    def send_replies(self, bot: Bot, config: TelegramConfig) -> None:
+        """Send the owner every reply that has come in since. A watch ends
+        once its turn does, with or without a reply."""
+        if not config.paired:
+            self._watches = []
+            return
+        due, self._watches = self._watches, []
+        for i, w in enumerate(due):
+            try:
+                replies = w.chats.replies(w.project, w.name)
+                if len(replies) <= w.seen:
+                    agent = next((a for a in w.chats.refresh(w.project) if a.name == w.name), None)
+                    if agent is not None and agent.status is Status.WORKING:
+                        self._watches.append(w)  # still thinking
+                        continue
+                    replies = w.chats.replies(w.project, w.name)  # it may have just finished
+                if len(replies) < w.seen:
+                    continue  # started over elsewhere (Reset on the web page)
+                if len(replies) == w.seen:
+                    bot.send_message(config.chat_id, NO_REPLY.format(label=w.label))
+                for reply in replies[w.seen :]:
+                    bot.send_message(config.chat_id, reply_text(w.label, reply))
+                    w.seen += 1
+            except TelegramError:
+                # Telegram can't be reached: send the rest next pass.
+                if len(replies) > w.seen:
+                    self._watches.append(w)
+                self._watches.extend(due[i + 1 :])
+                raise
+            except Exception:
+                log.exception("Telegram: couldn't check %s's reply", w.label)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -410,7 +498,9 @@ class TelegramLink:
             return config
         if not isinstance(text, str):
             return config  # a photo, sticker and so on
-        bot.send_message(chat_id, self.answer(command, rest))
+        reply = self.answer(command, rest)
+        if reply:  # nothing yet when the answer comes from an agent's turn
+            bot.send_message(chat_id, reply)
         return config
 
     @staticmethod
@@ -419,13 +509,54 @@ class TelegramLink:
         return bool(code) and hmac.compare_digest(given.strip().encode(), code.encode())
 
     def answer(self, command: str, rest: str) -> str:
-        """The reply to the owner's message."""
+        """The reply to the owner's message, or "" when an agent's turn will
+        answer it (see ``send_replies``)."""
         if command in ("start", "help"):
             return HELP
         if command == "status":
             return status_text(self.workspace)
         if command == "backlog":
             return backlog_text(self.workspace)
+        if command == "add":
+            return self.add(rest)
+        if command == "reset":
+            return self.reset_jef()
         if command:
             return f"I don't know /{command}. Send /help to see what works."
-        return NOT_YET
+        return self.message_jef(rest)
+
+    def message_jef(self, text: str) -> str:
+        """Pass a plain message to Jef's front desk; its reply comes back later."""
+        if not text:
+            return ""
+        runner = self.runtime.get_jef_chats()
+        if runner is None:
+            return actions.NO_CLAUDE
+        seen = len(runner.replies(jefchat.HOME, jefchat.NAME))
+        try:
+            jefchat.send(runner, self.workspace, text, sender="telegram")
+        except ChatError as err:
+            return JEF_BUSY if "still working" in str(err) else f"Couldn't reach Jef: {err}"
+        self.watch(runner, jefchat.HOME, jefchat.NAME, "Jef", seen)
+        return ""
+
+    def reset_jef(self) -> str:
+        runner = self.runtime.get_jef_chats()
+        if runner is None:
+            return actions.NO_CLAUDE
+        try:
+            jefchat.reset(runner, self.workspace)
+        except ChatError as err:
+            return f"Couldn't start Jef over: {err}"
+        self.watch(runner, jefchat.HOME, jefchat.NAME, "Jef", seen=0)  # a fresh conversation
+        return RESET
+
+    def add(self, feature: str) -> str:
+        """Add to the backlog, like the form on the home page."""
+        if not feature:
+            return ADD_USAGE
+        try:
+            item = actions.add_backlog_item(self.workspace, feature)
+        except ValueError:
+            return ADD_USAGE
+        return f"Added #{item.number}: {item.feature}. Start it from Jef's home page when you're ready."
