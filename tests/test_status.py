@@ -68,8 +68,8 @@ def test_render_and_read_round_trip(ws):
     save_tasks(
         ws,
         Task(1, "Show it", TaskStatus.MERGED, "impl-1", "https://github.com/o/r/pull/1"),
-        Task(2, "Test it", TaskStatus.IMPLEMENTATION, "impl-2"),
-        Task(3, "Document it"),
+        Task(2, "Test it", TaskStatus.IMPLEMENTATION, "impl-2", after=[1]),
+        Task(3, "Document it", after=[1, 2]),
     )
     agents = [
         ada(note="Approved the tasks"),
@@ -91,9 +91,9 @@ def test_render_and_read_round_trip(ws):
         "updated": "2026-11-11 14:05",
     }
     rows = mdtable.parse(text).rows
-    assert rows[0] == ["1", "Show it", "Merged", "impl-1", "Stopped", "https://github.com/o/r/pull/1", "PR opened"]
-    assert rows[1][2:5] == ["Implementation", "impl-2", "Working"]
-    assert rows[2] == ["3", "Document it", "Not started", "", "", "", ""]
+    assert rows[0] == ["1", "Show it", "", "Merged", "impl-1", "Stopped", "https://github.com/o/r/pull/1", "PR opened"]
+    assert rows[1][2:6] == ["1", "Implementation", "impl-2", "Working"]
+    assert rows[2] == ["3", "Document it", "1, 2", "Not started", "", "", "", ""]
 
 
 def test_no_tasks_and_no_status_file(ws):
@@ -113,7 +113,7 @@ def test_untrusted_notes_stay_on_one_line_and_in_their_cell(ws):
     assert fields["coordinator note"].startswith("Stuck: a | b - Phase: Done")
     assert len(fields["coordinator note"]) <= 160
     row = mdtable.parse(status_path(ws, SLUG).read_text()).rows[0]
-    assert len(row) == 7 and row[6].startswith("Stuck: a | b")
+    assert len(row) == 8 and row[7].startswith("Stuck: a | b")
 
 
 def test_unchanged_status_is_not_rewritten(ws):

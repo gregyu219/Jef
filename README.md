@@ -89,7 +89,7 @@ A coordinator acts with its own `jef` commands, grouped by what they act on. The
 | `jef overview` | The project at a glance (reads the files) |
 | `jef agent read impl-2` | An agent's latest reply (reads the chat) |
 | `jef research start ["brief"]` | Starts the research agent |
-| `jef tasks set "Task" "Task" …` | Sets the task list. While building, it replaces only the tasks that haven't started |
+| `jef tasks set "Task" "Task" …` | Sets the task list. End a title with `[after 1, 2]` if the task needs tasks 1 and 2 merged first; a task can only come after earlier ones. While building, it replaces only the tasks that haven't started |
 | `jef tasks approve` | Approves the list, only after it has waited a heartbeat for you and only if that's allowed for the project |
 | `jef task start N` | Starts task N's implementer, if the project has fewer tasks being built than it builds at once (a task whose PR is open doesn't count). With `--on M`, it builds on task M's branch instead of `main`, once M's PR is open |
 | `jef agent send impl-2 "…"` | Messages one of its own agents |
@@ -121,7 +121,7 @@ By default tasks are built **one at a time**. Only tasks being built count: once
 
 Three kinds of program take part. **You** use Jef's web page. **The running Jef** (`jef start`) is the only thing that launches agents, writes the project's files and pushes code. **Agents** (the coordinator, the research agent, implementers) are Claude Code sessions that only run while they answer a message.
 
-**Jef's timer.** This runs inside the running Jef. It never calls Claude to decide anything. A turn only starts when Jef wakes the coordinator, or when the coordinator asks for one.
+**Jef's timer.** This runs inside the running Jef. It never calls Claude to decide anything. A turn only starts when Jef wakes the coordinator, or when the coordinator asks for one. The one thing it starts by itself is a task that's ready: while building, every half minute, it starts each task whose *After* tasks have all merged, in order, up to *Implementers at once*, and tells the coordinator. It doesn't while the project has a problem or the coordinator is waiting for you. Lists set before Jef knew about *After* are left to the coordinator.
 
 ```mermaid
 flowchart TD
@@ -132,7 +132,7 @@ flowchart TD
     C -- no --> A
     E --> A
 
-    T([Every 30 seconds, for each project]) --> U[Mark finished agents Idle<br/>Save research.md<br/>Update status.md<br/>Check the budget]
+    T([Every 30 seconds, for each project]) --> U[Mark finished agents Idle<br/>Save research.md<br/>Update status.md<br/>Check the budget<br/>Start tasks that are ready]
     U --> V{Coordinator idle?}
     V -- no --> T
     V -- yes --> W{Any of these?<br/>an agent finished a turn<br/>you pressed a button<br/>its heartbeat is due}

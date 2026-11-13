@@ -22,13 +22,21 @@ TASKS = """# Tasks: To-do list app
 
 Plan: research.md
 
+| # | Task | After | Status | Agent | PR |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Set up the project | | Merged | impl-1 | #1 |
+| 2 | Show the task list | 1 | Pending review | impl-2 | #2 |
+| 3 | Save tasks to a file | 1 | Implementation | impl-3 | |
+| 4 | Add due dates | | Research | research-4 | |
+| 5 | Dark mode | 2, 3 | Not started | | |
+"""
+
+OLD_TASKS = """# Tasks: To-do list app
+
 | # | Task | Status | Agent | PR |
 | --- | --- | --- | --- | --- |
 | 1 | Set up the project | Merged | impl-1 | #1 |
-| 2 | Show the task list | Pending review | impl-2 | #2 |
-| 3 | Save tasks to a file | Implementation | impl-3 | |
-| 4 | Add due dates | Research | research-4 | |
-| 5 | Dark mode | Not started | | |
+| 2 | Dark mode | Not started | | |
 """
 
 
@@ -147,6 +155,21 @@ def test_task_list_round_trip_keeps_the_plan_line(tmp_path):
     path = tmp_path / "tasks.md"
     path.write_text(TASKS)
     assert TaskList.load(path).render() == TASKS
+
+
+def test_task_list_loads_what_each_task_comes_after(tmp_path):
+    path = tmp_path / "tasks.md"
+    path.write_text(TASKS)
+    assert [t.after for t in TaskList.load(path).tasks] == [[], [1], [1], [], [2, 3]]
+
+
+def test_old_task_list_without_after_loads_as_none_and_gains_the_column(tmp_path):
+    path = tmp_path / "tasks.md"
+    path.write_text(OLD_TASKS)
+    tasks = TaskList.load(path)
+    assert [(t.title, t.after) for t in tasks.tasks] == [("Set up the project", []), ("Dark mode", [])]
+    assert "| # | Task | After | Status | Agent | PR |" in tasks.render()
+    assert "| 2 | Dark mode | | Not started | | |" in tasks.render()
 
 
 def test_status_names_are_case_insensitive():

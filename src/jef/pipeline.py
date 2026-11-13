@@ -5,7 +5,9 @@ plans the tasks, starts implementers (up to N tasks at a time, set per
 project), nudges them, checks their PRs on GitHub (merged? conflicts?) and
 sends work back. It does all of that with its own ``jef`` commands (``jef
 task start 1``, ``jef prs check``; see ``jef.coordinate``), which Jef carries
-out from its inbox (``jef.inbox``). Jef doesn't decide anything itself.
+out from its inbox (``jef.inbox``). Jef doesn't decide anything itself: the
+one thing it does on its own is start tasks the coordinator's plan says are
+ready (every task they come after has merged), up to the limit.
 
 **Jef only keeps time and keeps the rules.** While it runs, it:
 
@@ -16,7 +18,9 @@ out from its inbox (``jef.inbox``). Jef doesn't decide anything itself.
   when one of its agents finishes a turn, a PR merges or you press a button,
 - every few minutes, asks GitHub (with ``gh``, no LLM) whether each PR
   waiting for review has merged; a merge is recorded as ``jef prs check``
-  would, and the coordinator is woken to start the next task,
+  would, and the coordinator is woken,
+- starts each task with nothing left to wait for (``[after N]`` in its
+  title, see ``Pipeline.plan``), up to the project's limit,
 - saves the research agent's findings as research.md, and
 - reads the files to keep status.md up to date. That costs nothing: no LLM
   call and no GitHub call.
@@ -61,7 +65,7 @@ from jef.projects import (
 )
 from jef.publish import Publisher, PublishError
 from jef.status import WAITING, Phase, project_phase, render_status, write_status
-from jef.tasks import Task, TaskList, TaskStatus
+from jef.tasks import Task, TaskList, TaskStatus, format_after
 from jef.workspace import Workspace
 
 log = logging.getLogger("jef.pipeline")
@@ -78,6 +82,8 @@ BUDGET_PROBLEM = "Budget reached"  # how a budget pause starts, so raising the b
 MAX_BUDGET_USD = 100_000
 # Only tasks being built count toward "Implementers at once"; a PR waiting for review doesn't.
 BUILDING = (TaskStatus.IMPLEMENTATION,)
+# A task title can end with the tasks it needs merged first: "Add the page [after 1, 2]".
+AFTER = re.compile(r"\s*\[after\s+([\d,\s]+)\]\s*$", re.I)
 
 
 class PipelineError(RuntimeError):
@@ -108,6 +114,20 @@ def pr_label(url: str) -> str:
 def _short(text: str, limit: int = 160) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def split_after(title: str) -> tuple[str, list[int]]:
+    """("Add the page", [1, 2]) from "Add the page [after 1, 2]"."""
+    found = AFTER.search(title)
+    if not found:
+        return title.strip(), []
+    numbers = sorted({int(n) for n in found.group(1).replace(",", " ").split()})
+    return title[: found.start()].strip(), numbers
+
+
+def _after_note(task: Task) -> str:
+    """" (after 1, 2)" for a task that waits for others, else ""."""
+    return f" (after {format_after(task.after)})" if task.after else ""
 
 
 def _at_limit(numbers: list[int], limit: int) -> str:
@@ -426,7 +446,8 @@ class Pipeline:
     def plan(self, slug: str, titles: list[str], by: str) -> str:
         """Set the task list. Before approval this replaces it; while building
         it replaces only the tasks that haven't started."""
-        titles = [_short(t, 200) for t in titles if t.strip()]
+        planned = [split_after(t) for t in titles if t.strip()]
+        titles = [_short(title, 200) for title, _ in planned]
         with self.chats.lock:
             phase = self.phase(slug)
             if phase in (Phase.UNDERSTANDING, Phase.RESEARCH):
@@ -436,15 +457,24 @@ class Pipeline:
             if not titles and phase is not Phase.BUILDING:
                 raise PipelineError('Give at least one task, like: jef tasks set "Show the version in the footer"')
             tasks = self.tasks(slug)
+            kept = [t for t in tasks.tasks if t.status is not TaskStatus.NOT_STARTED] if phase is Phase.BUILDING else []
+            first = max((t.number for t in kept), default=0) + 1
+            new = [Task(n, title, after=after) for n, (title, (_, after)) in enumerate(zip(titles, planned), start=first)]
+            numbers = {t.number for t in kept + new}
+            for task in new:
+                for needed in task.after:
+                    if needed >= task.number or needed not in numbers:
+                        raise PipelineError(
+                            f"Task {task.number} ({task.title}) can't come after task {needed}: a task can only "
+                            "come after an earlier task in the list. See `jef overview` for the numbers."
+                        )
+            tasks.tasks = kept + new
+            self._save_tasks(slug, tasks)
+            # Lists set from now on say what each task waits for, so Jef may start them by itself.
+            set_goal_field(self.workspace, slug, "Dependencies", "yes")
             if phase is Phase.BUILDING:
-                kept = [t for t in tasks.tasks if t.status is not TaskStatus.NOT_STARTED]
-                after = max((t.number for t in kept), default=0)
-                tasks.tasks = kept + [Task(after + i, title) for i, title in enumerate(titles, start=1)]
-                self._save_tasks(slug, tasks)
                 self.write_status(slug)
                 return "Kept the tasks that have started, and set the rest:\n" + self._task_lines(tasks)
-            tasks.tasks = [Task(i, title) for i, title in enumerate(titles, start=1)]
-            self._save_tasks(slug, tasks)
             # The list waits for the person: the coordinator may approve it
             # only once it has waited a whole heartbeat.
             set_goal_field(self.workspace, slug, "Tasks proposed", str(int(self.now())))
@@ -468,16 +498,27 @@ class Pipeline:
                         "Ask them, and decide at your next heartbeat if they haven't."
                     )
             set_goal_field(self.workspace, slug, "Tasks approved", "yes")
+            if self.starts_tasks(slug):
+                next_step = (
+                    "Jef starts every task with nothing left to wait for by itself, up to the limit, "
+                    "within a minute."
+                )
+            else:
+                next_step = "Start the first task with `jef task start 1`."
             if by == "you":
-                self._tell_coordinator(slug, "The person approved the tasks. Start the first one with `jef task start 1`.")
+                self._tell_coordinator(slug, f"The person approved the tasks. {next_step}")
             elif by == "auto":
                 self._tell_coordinator(
-                    slug,
-                    "Jef auto-approved the task list (the person turned on Auto approve). "
-                    "Start the first task with `jef task start 1`.",
+                    slug, f"Jef auto-approved the task list (the person turned on Auto approve). {next_step}"
                 )
             self.write_status(slug)
-            return "The tasks are approved. Start the first with `jef task start 1`."
+            return f"The tasks are approved. {next_step}"
+
+    def starts_tasks(self, slug: str) -> bool:
+        """Whether Jef starts this project's unblocked tasks by itself. Only
+        for lists set since tasks.md has an After column: in an older list
+        every task would look independent."""
+        return goal_fields(self.workspace, slug).get("dependencies", "").lower() == "yes"
 
     def stacked(self, slug: str) -> dict[int, int]:
         """Which tasks were built on another task's unmerged branch, from
@@ -493,12 +534,47 @@ class Pipeline:
         pairs = {**self.stacked(slug), number: on}
         set_goal_field(self.workspace, slug, "Stacked", ", ".join(f"{n} on {m}" for n, m in sorted(pairs.items())))
 
-    def start_task(self, slug: str, number: int, by: str, on: int | None = None) -> str:
+    def start_ready(self, slug: str) -> list[str]:
+        """Jef's own step while building: start every task that's waiting for
+        nothing (each task it comes after has merged), in number order, up to
+        the project's limit. Never while there's a problem or a ``jef wait``.
+        Returns the news it queued for the coordinator."""
+        with self.chats.lock:
+            if load_project(self.workspace, slug) is None or self.phase(slug) is not Phase.BUILDING:
+                return []
+            if not self.starts_tasks(slug) or self.problem(slug) or self._budget_problem(slug):
+                return []
+            tasks = self.tasks(slug).tasks
+            merged = {t.number for t in tasks if t.status is TaskStatus.MERGED}
+            starting = [n for s, n in self._in_flight if s == slug]
+            busy = sum(t.status in BUILDING for t in tasks) + len(starting)
+            room = self.implementers_at_once(slug) - busy
+            ready = [
+                t for t in tasks
+                if t.status is TaskStatus.NOT_STARTED and t.number not in starting and set(t.after) <= merged
+            ][: max(room, 0)]
+        news = []
+        # Outside the lock: each start fetches and makes a worktree.
+        for task in ready:
+            try:
+                self.start_task(slug, task.number, by="Jef", lift_wait=False)
+            except (PipelineError, ChatError) as err:
+                # Someone else started it, or the project changed meanwhile.
+                log.info("Jef didn't start task %s in %s: %s", task.number, slug, err)
+                continue
+            why = "the tasks it comes after have merged" if task.after else "it doesn't wait for any other task"
+            item = f"Jef started task {task.number} (impl-{task.number}): {why}."
+            with self.chats.lock:
+                self._tell_coordinator(slug, item)
+            news.append(item)
+        return news
+
+    def start_task(self, slug: str, number: int, by: str, on: int | None = None, lift_wait: bool = True) -> str:
         with self.chats.lock:
             if self.phase(slug) is not Phase.BUILDING:
                 raise PipelineError("The tasks haven't been approved yet.")
             problem = self.problem(slug)
-            if problem and WAITING not in problem:
+            if problem and (WAITING not in problem or not lift_wait):
                 raise PipelineError(f"There's a problem to sort out first: {problem}")
             tasks = self.tasks(slug)
             task = next((t for t in tasks.tasks if t.number == number), None)
@@ -653,7 +729,13 @@ class Pipeline:
                     self.chats.update(slug, agent)
                 said = f"{'Updated' if updated else 'Opened'} {pr_label(url)}: {url}" + note_said
                 if not updated and any(t.status is TaskStatus.NOT_STARTED for t in tasks.tasks):
-                    said += ". You can start the next task now, unless it needs this one's code."
+                    if self.starts_tasks(slug):
+                        said += (
+                            ". Its slot is free: Jef starts the next task with nothing left to wait for within "
+                            f"a minute. To build one on this task's code now, use `jef task start N --on {number}`."
+                        )
+                    else:
+                        said += ". You can start the next task now, unless it needs this one's code."
                 self.write_status(slug)
                 return said
         finally:
@@ -725,6 +807,11 @@ class Pipeline:
         with self.chats.lock:
             tasks = self.tasks(slug)
             news = []
+            next_step = (
+                "; Jef starts the tasks that were waiting for it by itself."
+                if self.starts_tasks(slug)
+                else "; start the next task."
+            )
             for task in tasks.tasks:
                 # Re-checked: `jef prs check` may have recorded it meanwhile.
                 if (task.number, task.pr) in merged and task.status is not TaskStatus.MERGED:
@@ -732,7 +819,7 @@ class Pipeline:
                     stopped = f" and stopped {task.agent}" if task.agent else ""
                     news.append(
                         f"{pr_label(task.pr)} merged (task {task.number}: {task.title}). "
-                        f"Jef recorded it{stopped}; start the next task."
+                        f"Jef recorded it{stopped}{next_step}"
                     )
             if not news:
                 return []
@@ -952,7 +1039,7 @@ class Pipeline:
     # -- what agents are told
 
     def _task_lines(self, tasks: TaskList) -> str:
-        return "\n".join(f"{t.number}. {t.title} ({t.status.value})" for t in tasks.tasks)
+        return "\n".join(f"{t.number}. {t.title}{_after_note(t)} ({t.status.value})" for t in tasks.tasks)
 
     def _wake_message(self, slug: str, agents: list[Agent], finished: list[Agent], news: list[str], since: float) -> str:
         lines = [f"- {item}" for item in news]
@@ -1016,7 +1103,7 @@ class Pipeline:
             f"## goal.md\n\n{self._goal(slug)}\n"
             f"## research.md\n\n{_tail(self.research(slug))}\n\n"
             "## All tasks, so you know what's yours and what isn't\n\n"
-            + "\n".join(f"{t.number}. {t.title}" for t in self.tasks(slug).tasks)
+            + "\n".join(f"{t.number}. {t.title}{_after_note(t)}" for t in self.tasks(slug).tasks)
             + "\n\n"
             "When it's done and tested, commit it and end your reply with a ```pr block and "
             "`STATUS: ready`. Don't push or open the PR yourself: your coordinator reads your reply "
@@ -1085,6 +1172,11 @@ class Heartbeat:
                 self.pipeline.tick(slug)
             except Exception:  # One broken project mustn't stop the others.
                 log.exception("Heartbeat failed for project %s", slug)
+            try:
+                # After tick, so a list it just auto-approved starts straight away.
+                self.pipeline.start_ready(slug)
+            except Exception:
+                log.exception("Couldn't start ready tasks for project %s", slug)
             try:
                 # Done and Stopped projects too, so their last status is written.
                 self.pipeline.write_status(slug)
