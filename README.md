@@ -57,6 +57,8 @@ Things it can't help with:
 
 Anything you type that isn't a command goes to Jef's front desk, the same chat as on the home page, and Jef's answer is sent back to you when it's ready. `/reset` starts that chat over. `/add <feature>` adds an item to the backlog; start it from the home page. `/status` and `/backlog` show how things stand without any AI call.
 
+To talk to a project's coordinator, send `/to <name>` (like `/to Radia`). From then on your messages go to that coordinator, and its answers come back to you, until you send `/to jef`. `/to Radia <message>` sends just one message. `/approve`, `/wake` and `/retry` do what the project page's buttons do: approve the proposed tasks, ask the coordinator to check now, and try again after a problem. Add the coordinator's name, or leave it out to use the one you picked with `/to`.
+
 Jef asks Telegram for new messages itself (long polling), so nothing on your computer is opened to the internet, and the bot only answers while Jef is running. The token is kept in a file only you can read, outside `~/.jef` so no agent can read it: `~/Library/Application Support/jef/telegram.json` on a Mac. Set `JEF_SECRETS` to keep it somewhere else. Settings never shows the token again; **Forget this bot** deletes it. Telegram messages aren't end-to-end encrypted, so project details you see there pass through Telegram's servers.
 
 ## How it works
