@@ -978,3 +978,91 @@ def test_heartbeat_marks_jef_alive_and_answers_requests(w):
     Heartbeat(w.pipeline).inbox_all()
     assert inbox.jef_is_running(w.ws)
     assert inbox.wait_for_answer(w.ws, w.slug, request_id, 0)["ok"]
+
+
+def lock_is_free(w):
+    """From another thread, as the web page or the heartbeat would."""
+    got = []
+    thread = threading.Thread(target=lambda: got.append(w.chats.lock.acquire(timeout=1) and (w.chats.lock.release() or True)))
+    thread.start()
+    thread.join()
+    return got == [True]
+
+
+def test_publishing_doesnt_hold_jefs_lock(w):
+    # A fetch or push can hang for minutes (the Mac slept mid-fetch once);
+    # the page, the heartbeat and other projects mustn't wait for it.
+    building(w)
+    w.reply("impl-1", READY)
+    seen = []
+    publish = w.publisher.publish
+    w.publisher.publish = lambda *a: seen.append(lock_is_free(w)) or publish(*a)
+    w.ok("publish", number="1")
+    assert seen == [True]
+    assert w.pipeline.tasks(w.slug).tasks[0].status is TaskStatus.PENDING_REVIEW
+
+
+def test_checking_prs_doesnt_hold_jefs_lock(w):
+    pr_open(w)
+    seen = []
+    w.pipeline.pr_state = lambda url: seen.append(lock_is_free(w)) or "MERGED"
+    assert "merged" in w.ok("prs")
+    assert seen == [True]
+
+
+def test_starting_a_task_doesnt_hold_jefs_lock_while_it_fetches(w):
+    tasks_waiting(w)
+    w.pipeline.approve_tasks(w.slug)
+    seen = []
+    new_worktree = w.git.new_worktree
+    w.git.new_worktree = lambda *a: seen.append(lock_is_free(w)) or new_worktree(*a)
+    w.ok("start", number="1")
+    assert seen == [True]
+    assert w.agent("impl-1")
+
+
+def test_a_task_isnt_published_twice_at_once(w):
+    building(w)
+    w.reply("impl-1", READY)
+    answers = []
+    publish = w.publisher.publish
+
+    def slow(*a):
+        # While this publish is out, a second request for the same task comes in.
+        answers.append(w.pipeline._in_flight.copy())
+        with pytest.raises(PipelineError, match="already being published"):
+            w.pipeline.publish(w.slug, 1)
+        return publish(*a)
+
+    w.publisher.publish = slow
+    w.ok("publish", number="1")
+    assert answers == [{(w.slug, 1)}]
+    assert len(w.publisher.calls) == 1 and not w.pipeline._in_flight
+
+
+def test_one_inbox_reader_per_project(w):
+    w.reply("ada", "hi")
+    request_id = inbox.submit(w.ws, w.slug, "ada", "research", {})
+    reader = w.pipeline._inbox_locks.setdefault(w.slug, threading.Lock())
+    with reader:  # the heartbeat is reading it
+        assert w.pipeline.process_inbox(w.slug) == 0  # so Check now doesn't too
+    assert w.pipeline.process_inbox(w.slug) == 1
+    assert inbox.wait_for_answer(w.ws, w.slug, request_id, 0)["ok"]
+
+
+def test_a_slow_request_doesnt_stop_the_heartbeat(w):
+    building(w)
+    w.reply("impl-1", READY)
+    release = threading.Event()
+    publish = w.publisher.publish
+    w.publisher.publish = lambda *a: release.wait(5) and publish(*a)
+    request_id = inbox.submit(w.ws, w.slug, "ada", "publish", {"number": "1"})
+    beat = Heartbeat(w.pipeline, background=True)
+    beat.inbox_all()  # starts the publish in its own thread
+    (w.ws.root / "jef.alive").unlink()
+    beat.inbox_all()  # comes straight back while the publish is still out
+    assert inbox.jef_is_running(w.ws)
+    assert lock_is_free(w)
+    release.set()
+    beat._readers[w.slug].join(5)
+    assert inbox.wait_for_answer(w.ws, w.slug, request_id, 0)["ok"]
