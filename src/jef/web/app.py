@@ -18,6 +18,7 @@ from jef.chats import Agent, Chats, ChatError, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
 from jef.pipeline import Phase, Pipeline, PipelineError, pr_label
+from jef.runtime import Runtime
 from jef.projects import (
     MAX_IMPLEMENTERS_AT_ONCE,
     DeleteError,
@@ -41,7 +42,6 @@ from jef.tasks import TaskList, TaskStatus
 from jef.usage import (
     Usage,
     agent_usage,
-    budget_left,
     budget_usd,
     format_cost,
     format_rate,
@@ -211,46 +211,29 @@ def create_app(
     choose_name: Callable[[list[str]], str] = random.choice,
     jef_chats: Chats | None = None,
     on_agents_ready: Callable[[Pipeline], None] | None = None,
+    runtime: Runtime | None = None,
 ) -> FastAPI:
-    """``claude_status`` is the result of the check ``jef`` ran on startup, if any."""
-    ws = workspace or Workspace.default()
+    """``claude_status`` is the result of the check ``jef`` ran on startup, if any.
+
+    Pass a ``runtime`` to share its chats and pipeline with Jef's background
+    threads; otherwise one is made from ``claude_status``, ``chats``,
+    ``jef_chats`` and ``pipeline``."""
+    if runtime is None:
+        runtime = Runtime(
+            workspace or Workspace.default(),
+            claude_status=claude_status,
+            chats=chats,
+            jef_chats=jef_chats,
+            pipeline=pipeline,
+        )
+    ws = runtime.workspace
+    if on_agents_ready is not None:
+        runtime.on_agents_ready(on_agents_ready)
     app = FastAPI(title="Jef", docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.claude = claude_status
-    app.state.chats = chats
-    app.state.jef_chats = jef_chats
-    app.state.pipeline = pipeline
-
-    def get_chats() -> Chats | None:
-        """Agents can only run once Claude Code has been checked and works."""
-        status = app.state.claude
-        if app.state.chats is None and status is not None and status.ok:
-            app.state.chats = Chats(
-                ws,
-                status.path,
-                budget_left=lambda slug: budget_left(ws, slug),
-                model_for=lambda slug, role: models.model_for(ws, slug, role),
-            )
-        return app.state.chats
-
-    def get_jef_chats() -> Chats | None:
-        """The home page's own chat, kept apart from the projects."""
-        status = app.state.claude
-        if app.state.jef_chats is None and status is not None and status.ok:
-            app.state.jef_chats = jefchat.make_chats(ws, status.path)
-        return app.state.jef_chats
-
-    def get_pipeline() -> Pipeline | None:
-        """Projects can only run once Claude Code works. The first time it
-        does (at start, or after Check again), ``on_agents_ready`` starts
-        Jef's timer."""
-        runner = get_chats()
-        if app.state.pipeline is None and runner is not None:
-            app.state.pipeline = Pipeline(ws, runner)
-            if on_agents_ready is not None:
-                on_agents_ready(app.state.pipeline)
-        return app.state.pipeline
-
-    app.state.get_pipeline = get_pipeline
+    app.state.runtime = runtime
+    get_chats = runtime.get_chats
+    get_jef_chats = runtime.get_jef_chats
+    get_pipeline = runtime.get_pipeline
 
     def known(slug: str):
         return load_project(ws, slug) if slug in ws.project_slugs() else None
@@ -289,7 +272,7 @@ def create_app(
                 "now": now,
                 "statuses": list(TaskStatus),
                 "workspace": ws.root,
-                "claude": app.state.claude,
+                "claude": runtime.claude,
                 "coordinator_pages": coordinator_pages(),
                 "attention": backlog_attention(ws, backlog),
                 "item_projects": backlog_projects(ws),
@@ -360,8 +343,8 @@ def create_app(
     def remove_project(slug: str) -> None:
         """Stop the project's agents, delete its folder and its backlog row."""
         delete_project(ws, slug, get_chats())
-        if app.state.pipeline is not None:
-            app.state.pipeline.forget(slug)
+        if runtime.pipeline is not None:
+            runtime.pipeline.forget(slug)
 
     @app.post("/backlog/{number}/delete")
     def delete_backlog_item(number: int):
@@ -628,7 +611,7 @@ def create_app(
             "settings.html",
             {
                 "page": "settings",
-                "claude": app.state.claude,
+                "claude": runtime.claude,
                 "github": github_check(),
                 "notice": notice,
                 "error": error,
@@ -637,7 +620,7 @@ def create_app(
 
     @app.post("/settings/claude-check")
     def check_claude_again():
-        app.state.claude = claude_check()
+        runtime.claude = claude_check()
         get_pipeline()  # if it works now, agents (and Jef's timer) can start
         return RedirectResponse("/settings?notice=checked", status_code=303)
 
