@@ -85,12 +85,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     from jef.pipeline import Heartbeat, Pipeline
     from jef.workspace import Workspace
 
+    from jef.ssh import keep_ssh_alive
+
     ws = Workspace.default()
+    keep_ssh_alive()  # a fetch on a dead connection gives up instead of hanging Jef
     heartbeats: list[Heartbeat] = []
 
     def start_heartbeat(pipeline: Pipeline) -> None:
         """Called once agents can run: now, or when Check again first works."""
-        heartbeat = Heartbeat(pipeline)
+        heartbeat = Heartbeat(pipeline, background=True)
         heartbeat.tick_all()  # pick up anything that finished while Jef was off
         heartbeat.start()
         heartbeats.append(heartbeat)

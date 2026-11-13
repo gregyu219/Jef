@@ -46,7 +46,7 @@ Jef wakes each coordinator on its heartbeat (every hour by default), so Jef need
 
 Things it can't help with:
 
-- **Sleep:** if your Mac sleeps, Jef pauses until it wakes. Closing a laptop lid puts it to sleep unless it's plugged in with an external display.
+- **Sleep:** if your Mac sleeps, Jef pauses until it wakes. Closing a laptop lid puts it to sleep unless it's plugged in with an external display, and `caffeinate` doesn't keep a Mac on battery awake. A fetch or push that was mid-way when it slept gives up within about a minute of waking (Jef gives git an SSH keepalive, unless you've set your own `GIT_SSH_COMMAND` or `core.sshCommand`), and the coordinator can try again. Git and GitHub calls run without holding up the rest of Jef, so one slow call doesn't stop the heartbeat or other projects.
 - **Restarts:** after a reboot, run `jef start` again.
 
 ## How it works

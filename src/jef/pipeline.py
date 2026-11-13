@@ -216,6 +216,11 @@ class Pipeline:
     _last_checked: dict[str, float] = field(default_factory=dict)
     _budget_checked: dict[str, tuple[object, str]] = field(default_factory=dict)
     _last_pr_poll: dict[str, float] = field(default_factory=dict)
+    # Tasks being started or published right now. Their git and GitHub calls
+    # run without the lock (a fetch can hang for minutes, e.g. across a sleep),
+    # so this stops a second request for the same task meanwhile.
+    _in_flight: set[tuple[str, int]] = field(default_factory=set)
+    _inbox_locks: dict[str, threading.Lock] = field(default_factory=dict)
 
     # -- reading project state
 
@@ -487,20 +492,34 @@ class Pipeline:
                 raise PipelineError(f"There's no task {number}. See `jef overview`.")
             if task.status is not TaskStatus.NOT_STARTED:
                 raise PipelineError(f"Task {number} has already started ({task.status.value}).")
-            busy = [t for t in tasks.tasks if t.status in BUILDING]
+            if (slug, number) in self._in_flight:
+                raise PipelineError(f"Task {number} is already being started.")
+            starting = [n for s, n in self._in_flight if s == slug]
+            busy = [t.number for t in tasks.tasks if t.status in BUILDING] + starting
             limit = self.implementers_at_once(slug)
             if len(busy) >= limit:
-                raise PipelineError(_at_limit([t.number for t in busy], limit))
+                raise PipelineError(_at_limit(sorted(busy), limit))
             merged = goal_fields(self.workspace, slug).get("last merged", "")
             note = f"Started by {by}" + (f" after {pr_label(merged)} merged" if merged else "")
-            try:
-                name = self._start_implementer(slug, tasks, task, note)
-            except (OSError, subprocess.SubprocessError) as err:
-                raise PipelineError(f"Couldn't start task {number}: {err}") from err
-            if problem:
-                set_goal_field(self.workspace, slug, "Problem", "none")  # it was only waiting for this
-            self.write_status(slug)
-            return f"Started {name} on task {number}. Jef wakes you when it finishes a turn."
+            self._in_flight.add((slug, number))
+        try:
+            # git fetch and worktree add, without the lock.
+            branch, base, work = self._prepare_worktree(slug, task)
+            with self.chats.lock:
+                tasks = self.tasks(slug)
+                task = next((t for t in tasks.tasks if t.number == number), None)
+                if task is None or task.status is not TaskStatus.NOT_STARTED:
+                    raise PipelineError(f"Task {number} changed while Jef was getting it ready. See `jef overview`.")
+                name = self._start_implementer(slug, tasks, task, note, branch, base, work)
+                if problem and self.problem(slug) == problem:
+                    set_goal_field(self.workspace, slug, "Problem", "none")  # it was only waiting for this
+                self.write_status(slug)
+        except (OSError, subprocess.SubprocessError) as err:
+            raise PipelineError(f"Couldn't start task {number}: {err}") from err
+        finally:
+            with self.chats.lock:
+                self._in_flight.discard((slug, number))
+        return f"Started {name} on task {number}. Jef wakes you when it finishes a turn."
 
     def send_to(self, slug: str, name: str, message: str, by: str) -> str:
         """Message one of the coordinator's agents: a nudge, feedback, a fix."""
@@ -552,45 +571,68 @@ class Pipeline:
                 )
             title, body = pr if pr else (task.title, "")
             title, body = title or task.title, body or task.title
-            replaced = task.pr if task.pr and self.pr_state(task.pr) == "CLOSED" else ""
+            if (slug, number) in self._in_flight:
+                raise PipelineError(f"Task {number} is already being published.")
+            self._in_flight.add((slug, number))
+            old_pr, folder, branch = task.pr, Path(agent.folder), self._branch(slug, task)
+        try:
+            # Push and open the PR without the lock: a fetch or push can hang
+            # for minutes, and nothing else should wait for it.
+            replaced = old_pr if old_pr and self.pr_state(old_pr) == "CLOSED" else ""
             if replaced:
                 # Jef only opens a new PR when the old one was closed; link it.
                 body = f"Replaces {replaced}, which was closed without merging.\n\n" + body
             repo = self.folder(slug) / "repo"
             try:
-                url = self.publisher.publish(
-                    Path(agent.folder), self._branch(slug, task), self.git.default_branch(repo), title, body
-                )
+                url = self.publisher.publish(folder, branch, self.git.default_branch(repo), title, body)
             except (OSError, subprocess.SubprocessError) as err:
                 raise PipelineError(f"Jef couldn't publish: {err}") from err
-            updated = bool(task.pr) and task.pr == url
-            task.status = TaskStatus.PENDING_REVIEW
-            task.pr = url
-            self._save_tasks(slug, tasks)
-            agent.note = ("PR updated" if updated else "PR opened") + ", waiting for your review"
-            self.chats.update(slug, agent)
-            said = f"{'Updated' if updated else 'Opened'} {pr_label(url)}: {url}"
+            updated = bool(old_pr) and old_pr == url
+            note_said = ""
             if updated and note.strip():
                 try:
-                    self.publisher.comment(Path(agent.folder), url, f"Jef: {_short(note, 500)}")
-                    said += " (and left your note on it)"
+                    self.publisher.comment(folder, url, f"Jef: {_short(note, 500)}")
+                    note_said = " (and left your note on it)"
                 except (PublishError, OSError, subprocess.SubprocessError) as err:
-                    said += f" (couldn't leave the note: {err})"
-            if not updated and any(t.status is TaskStatus.NOT_STARTED for t in tasks.tasks):
-                said += ". You can start the next task now, unless it needs this one's code."
-            self.write_status(slug)
-            return said
+                    note_said = f" (couldn't leave the note: {err})"
+            with self.chats.lock:
+                tasks = self.tasks(slug)
+                task = next((t for t in tasks.tasks if t.number == number), None)
+                if task is None:
+                    raise PipelineError(f"Opened {url}, but task {number} is gone from tasks.md.")
+                task.status = TaskStatus.PENDING_REVIEW
+                task.pr = url
+                self._save_tasks(slug, tasks)
+                agent = self._agent(slug, task.agent)
+                if agent is not None:
+                    agent.note = ("PR updated" if updated else "PR opened") + ", waiting for your review"
+                    self.chats.update(slug, agent)
+                said = f"{'Updated' if updated else 'Opened'} {pr_label(url)}: {url}" + note_said
+                if not updated and any(t.status is TaskStatus.NOT_STARTED for t in tasks.tasks):
+                    said += ". You can start the next task now, unless it needs this one's code."
+                self.write_status(slug)
+                return said
+        finally:
+            with self.chats.lock:
+                self._in_flight.discard((slug, number))
 
     def check_prs(self, slug: str) -> str:
         """Ask GitHub about every task's PR. Records merges (stopping their
         implementers) and reports conflicts, for the coordinator to act on."""
         with self.chats.lock:
+            asking = [(t.number, t.pr) for t in self.tasks(slug).tasks if t.pr and t.status is not TaskStatus.MERGED]
+        # Ask GitHub without the lock; each call can take up to 30 seconds.
+        answers = {}
+        for number, url in asking:
+            state = self.pr_state(url)
+            answers[(number, url)] = (state, self.pr_mergeable(url) if state == "OPEN" else "")
+        with self.chats.lock:
             tasks = self.tasks(slug)
             lines, changed = [], False
             for task in tasks.tasks:
-                if not task.pr or task.status is TaskStatus.MERGED:
+                if (task.number, task.pr) not in answers or task.status is TaskStatus.MERGED:
                     continue
-                state = self.pr_state(task.pr)
+                state, mergeable = answers[(task.number, task.pr)]
                 label = f"Task {task.number} ({pr_label(task.pr)})"
                 if state == "MERGED":
                     self._record_merge(slug, task)
@@ -599,7 +641,6 @@ class Pipeline:
                 elif state == "CLOSED":
                     lines.append(f"{label}: closed without merging. Decide with the person what to do.")
                 elif state == "OPEN":
-                    mergeable = self.pr_mergeable(task.pr)
                     if mergeable == "CONFLICTING":
                         lines.append(f"{label}: open, but it has merge conflicts with the main branch.")
                     elif mergeable == "MERGEABLE":
@@ -678,14 +719,21 @@ class Pipeline:
                 item.status = BacklogStatus.DONE
         backlog.save(self.workspace.backlog_file)
 
-    def _start_implementer(self, slug: str, tasks: TaskList, task: Task, note: str) -> str:
-        name = f"impl-{task.number}"
+    def _prepare_worktree(self, slug: str, task: Task) -> tuple[str, str, Path]:
+        """The task's branch and working folder (fetching first). Network, so
+        callers don't hold the lock."""
         repo = self.folder(slug) / "repo"
         base = self.git.default_branch(repo)
         branch = self._branch(slug, task)
-        work = self.folder(slug) / "work" / name
+        work = self.folder(slug) / "work" / f"impl-{task.number}"
         if not work.exists():
             self.git.new_worktree(repo, work, branch, base)
+        return branch, base, work
+
+    def _start_implementer(
+        self, slug: str, tasks: TaskList, task: Task, note: str, branch: str, base: str, work: Path
+    ) -> str:
+        name = f"impl-{task.number}"
         project = load_project(self.workspace, slug)
         agent = self.chats.spawn(
             slug,
@@ -709,7 +757,19 @@ class Pipeline:
     # -- the inbox: coordinators' requests
 
     def process_inbox(self, slug: str) -> int:
-        """Carry out waiting requests, oldest first. Returns how many."""
+        """Carry out waiting requests, oldest first. Returns how many. Only one
+        reader per project at a time, so a request is never carried out twice
+        (the heartbeat and the Check now button can both call this)."""
+        with self.chats.lock:
+            reader = self._inbox_locks.setdefault(slug, threading.Lock())
+        if not reader.acquire(blocking=False):
+            return 0
+        try:
+            return self._process_inbox(slug)
+        finally:
+            reader.release()
+
+    def _process_inbox(self, slug: str) -> int:
         done = 0
         for request in inbox.pending(self.workspace, slug):
             try:
@@ -904,8 +964,15 @@ class Heartbeat:
     re-reads each project and wakes coordinators that are due. Every few
     minutes it also asks GitHub whether a PR waiting for review has merged."""
 
-    def __init__(self, pipeline: Pipeline, every: float = INBOX_SECONDS, tick_every: float = TICK_SECONDS):
+    def __init__(
+        self, pipeline: Pipeline, every: float = INBOX_SECONDS, tick_every: float = TICK_SECONDS, background: bool = False
+    ):
         self.pipeline = pipeline
+        # With background on (as in `jef run`), each project's requests run in
+        # their own thread, so a slow publish in one project doesn't hold up
+        # the heartbeat or the other projects.
+        self.background = background
+        self._readers: dict[str, threading.Thread] = {}
         self.every = every
         self.tick_every = tick_every
         self._stop = threading.Event()
@@ -922,10 +989,23 @@ class Heartbeat:
     def inbox_all(self) -> None:
         inbox.mark_alive(self.pipeline.workspace)
         for slug in self.pipeline.workspace.project_slugs():
-            try:
-                self.pipeline.process_inbox(slug)
-            except Exception:
-                log.exception("Couldn't read the inbox for project %s", slug)
+            if not self.background:
+                self._read_inbox(slug)
+                continue
+            reader = self._readers.get(slug)
+            if reader is not None and reader.is_alive():
+                continue  # still carrying out an earlier request
+            if not inbox.pending(self.pipeline.workspace, slug):
+                continue
+            reader = threading.Thread(target=self._read_inbox, args=(slug,), name=f"jef-inbox-{slug}", daemon=True)
+            self._readers[slug] = reader
+            reader.start()
+
+    def _read_inbox(self, slug: str) -> None:
+        try:
+            self.pipeline.process_inbox(slug)
+        except Exception:
+            log.exception("Couldn't read the inbox for project %s", slug)
 
     def tick_all(self) -> None:
         self.inbox_all()
