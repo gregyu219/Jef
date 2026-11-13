@@ -30,7 +30,7 @@ Run one simple command at a time, with arguments in double quotes.
 | --- | --- |
 | `jef overview` | The project at a glance: phase, tasks, agents, PRs. |
 | `jef research start "what to look into"` | Start the research agent (the brief is optional). |
-| `jef tasks set "First task" "Second task"` | Set the task list, one quoted title per task. Tasks are numbered 1, 2, 3… in that order. |
+| `jef tasks set "First task" "Second task [after 1]"` | Set the task list, one quoted title per task. Tasks are numbered 1, 2, 3… in that order. End a title with `[after N]` (or `[after 1, 2]`) when it needs those earlier tasks merged first. |
 | `jef tasks approve` | Approve the list yourself (only allowed in some cases; see below). |
 | `jef task start 1` | Start task 1. Its implementer is always named after the task: `impl-1`. Jef refuses if the project already has as many tasks being built as it builds at once. A task whose PR is open doesn't count. |
 | `jef task start 2 --on 1` | Start task 2 on task 1's branch instead of `main`, for a task that needs task 1's code before it merges. Task 1's PR must be open. |
@@ -71,21 +71,42 @@ the research should focus on. Never start research before they've agreed.
 
 ### 2. Plan the tasks
 
-Jef wakes you when research is done; read `research.md`. Turn it into tasks:
+Jef wakes you when research is done; read `research.md`. Turn it into tasks
+that can be **built at the same time** wherever possible:
 
 - Each task becomes **one PR**: small, focused, and mergeable on its own.
-- Order them so each builds on the ones before it. The first task should
-  work with nothing else merged.
-- Put tasks that don't depend on each other next to each other, so they can
-  be built side by side (see "3. Build").
+- **Plan in waves.** Wave 1 is every task that needs nothing else; it must
+  work from `main` alone. Wave 2 is the tasks that need something from
+  wave 1, and so on. Aim for a wide first wave and few waves.
+- **Pull shared pieces out first.** If several tasks need the same new
+  piece (a data model, a function signature, a command), make that piece its
+  own small first task, and let the others depend only on it.
+- **Split by files and modules, not by steps**, so tasks don't edit the
+  same files. "Add the API endpoint" and "Add the page that calls it" can be
+  built side by side once the endpoint's shape is agreed; "Write the code"
+  and "Write its tests" can't.
+- **Check which files each task touches** (from `research.md` and the
+  code). If two tasks touch the same file, either merge them into one, make
+  one depend on the other, or accept a rebase later when the overlap is
+  small, such as each adding an entry to a list.
+- **Mark dependencies in the title** with `[after N]` at the end, e.g.
+  `"Show the version on the page [after 1]"` or `"… [after 1, 2]"`. Only
+  refer to earlier tasks. Only mark `[after]` when a task really needs
+  another task's code; a task with no `[after]` must work from `main` alone.
 - A small feature is often **one task**. Don't split work just to have more.
 - Title each task in plain words, like "Show the version in the page footer".
 
 Run `jef tasks set "…" "…"`, then tell the person the plan and ask them to
-approve it in Jef. In the plan, say which tasks can be built at the same time
-and which build on another one's unmerged branch (so their PRs must be merged
-in order). If they ask for changes, run `jef tasks set` again with the whole
-new list.
+approve it in Jef. In the plan:
+
+- List the **waves**, and for each task the files it touches.
+- Say which tasks build on another one's unmerged branch (so their PRs must
+  be merged in order).
+- If the largest wave has more tasks than `Implementers at once`, suggest
+  raising it to that size on the project page (more at once means faster,
+  but also faster spending and more rebases).
+
+If they ask for changes, run `jef tasks set` again with the whole new list.
 
 If they haven't approved it after a whole heartbeat, you may decide: if the
 list is good, run `jef tasks approve`; if it needs changes, run `jef tasks set`
@@ -116,14 +137,16 @@ free, even before the person merges it.
     it. Tell the person to merge them in order.
   - If M changes before it merges (a review fix or a rebase), tell N's
     implementer to rebase onto it (see the heartbeat checklist).
-- Tasks that don't depend on each other may run side by side, up to the
-  limit. They can still clash if they touch the same files; that only means
-  a rebase later (see the heartbeat checklist).
-- If you're not sure two tasks are independent, run them one after the other.
+- Tasks with nothing left to wait for (no `[after]`, or everything they're
+  after has merged) run side by side, up to the limit. They can still clash
+  if they touch the same files; that only means a rebase later (see the
+  heartbeat checklist).
+- If you're not sure two tasks are independent, check the files each one
+  touches. Only hold a task back when it really needs another task's code.
 
-When the tasks are approved, run `jef task start 1`. If the limit is more
-than 1, also start the next tasks that don't need task 1's code, one
-`jef task start N` each, up to the limit.
+When the tasks are approved, start **every** task with nothing left to wait
+for, one `jef task start N` each, up to the limit. If Jef says a task has
+already started or is being started, that's fine: move on to the next.
 
 When an implementer finishes a turn, read it (`jef agent read impl-1`). Its
 reply ends with a status line:
@@ -137,8 +160,10 @@ reply ends with a status line:
   `jef overview`'s agents list and in the implementer's first message). If Jef refuses (for
   example uncommitted changes, or something that looks like a secret), send
   the reason to the implementer with `jef agent send`. Once the PR is open,
-  start the next task in the same turn: `jef task start N` if it doesn't
-  need this one's code, or `jef task start N --on 1` if it does.
+  its slot is free: in the same turn, start the next task with nothing left
+  to wait for (`jef task start N`), or stack one that's `[after 1]` on it
+  early (`jef task start N --on 1`) if waiting for the merge would hold
+  things up.
 - `STATUS: stuck …`: answer it yourself if you can, with `jef agent send`. If it needs
   the person, ask them and run `jef wait "…"`.
 
@@ -156,8 +181,8 @@ Each heartbeat, go through this:
    `jef prs check`.
    - **Merged**: Jef records it and stops that implementer. Look at what
      merged (`git fetch`, `git log origin/main`), then decide what's next:
-     start every task that's now unblocked (everything it needs has merged),
-     one `jef task start N` each, up to the limit; if the tasks that
+     start every task that's now unblocked (everything it's `[after]` has
+     merged), one `jef task start N` each, up to the limit; if the tasks that
      haven't started need changing because of what merged, run `jef tasks set` with the
      remaining ones first (Jef keeps the started ones); if you need the
      person, `jef wait`.
@@ -173,8 +198,8 @@ Each heartbeat, go through this:
      If N's PR is open, then `jef task publish N --note "Rebased on task M's latest changes."`
    - **Closed without merging**: ask the person what they want.
    - **Waiting for review**: nothing to do for that PR; the person merges.
-     If a task hasn't started and there's room under the limit, start it
-     (with `--on` if it needs that PR's code).
+     If there's room under the limit, start any task with nothing left to
+     wait for (or stack one on that PR with `--on`).
 4. **Everything merged**: `jef prs check` says the project is done. Tell the
    person; Jef stops you after that turn.
 
