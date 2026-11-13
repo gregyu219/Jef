@@ -49,6 +49,14 @@ Things it can't help with:
 - **Sleep:** if your Mac sleeps, Jef pauses until it wakes. Closing a laptop lid puts it to sleep unless it's plugged in with an external display, and `caffeinate` doesn't keep a Mac on battery awake. A fetch or push that was mid-way when it slept gives up within about a minute of waking (Jef gives git an SSH keepalive, unless you've set your own `GIT_SSH_COMMAND` or `core.sshCommand`), and the coordinator can try again. Git and GitHub calls run without holding up the rest of Jef, so one slow call doesn't stop the heartbeat or other projects.
 - **Restarts:** after a reboot, run `jef start` again.
 
+### Using Jef from Telegram
+
+1. In Telegram, message @BotFather, send `/newbot` and follow its steps. It gives you a token.
+2. In Jef, open Settings, paste the token under Telegram and press Save. Jef checks it with Telegram, then shows a pairing code.
+3. Send the bot `/start <code>` from your own account (or use the link Settings shows). That chat becomes the only one the bot answers. Send `/help` to see what it can do.
+
+Jef asks Telegram for new messages itself (long polling), so nothing on your computer is opened to the internet, and the bot only answers while Jef is running. The token is kept in a file only you can read, outside `~/.jef` so no agent can read it: `~/Library/Application Support/jef/telegram.json` on a Mac. Set `JEF_SECRETS` to keep it somewhere else. Settings never shows the token again; **Forget this bot** deletes it. Telegram messages aren't end-to-end encrypted, so project details you see there pass through Telegram's servers.
+
 ## How it works
 
 Jef has four levels. Each one hands work to the level below it and keeps track of its own part.

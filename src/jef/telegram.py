@@ -27,7 +27,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -87,15 +87,16 @@ class TelegramConfig:
     token: str = ""
     chat_id: int | None = None  # the owner's chat, once paired
     pairing_code: str = ""  # cleared once paired
+    username: str = ""  # the bot's @username, from getMe, for the Settings page
 
     @property
     def paired(self) -> bool:
         return self.chat_id is not None
 
     @classmethod
-    def new(cls, token: str) -> "TelegramConfig":
+    def new(cls, token: str, username: str = "") -> "TelegramConfig":
         """A bot that isn't linked to anyone yet, with a fresh pairing code."""
-        return cls(token=token.strip(), pairing_code=new_pairing_code())
+        return cls(token=token.strip(), pairing_code=new_pairing_code(), username=username)
 
 
 def load_config(path: Path) -> TelegramConfig | None:
@@ -107,10 +108,16 @@ def load_config(path: Path) -> TelegramConfig | None:
     if not isinstance(data, dict) or not isinstance(data.get("token"), str):
         return None
     chat_id = data.get("chat_id")
+
+    def text(key: str) -> str:
+        value = data.get(key)
+        return value if isinstance(value, str) else ""
+
     return TelegramConfig(
         token=data["token"],
         chat_id=chat_id if isinstance(chat_id, int) else None,
-        pairing_code=data.get("pairing_code") if isinstance(data.get("pairing_code"), str) else "",
+        pairing_code=text("pairing_code"),
+        username=text("username"),
     )
 
 
@@ -133,8 +140,10 @@ def save_config(path: Path, config: TelegramConfig) -> None:
 
 
 def forget_config(path: Path) -> None:
-    """Unlink the bot: remove its token and owner."""
+    """Unlink the bot: remove its token and owner, and what the link kept
+    about it (its offset belongs to that bot alone)."""
     path.unlink(missing_ok=True)
+    path.with_name(STATE_FILE).unlink(missing_ok=True)
 
 
 # --- Talking to Telegram -----------------------------------------------------
@@ -213,6 +222,21 @@ class Bot:
         """Plain text (no formatting, so nothing needs escaping), split if long."""
         for part in split_text(text):
             self._call("sendMessage", {"chat_id": chat_id, "text": part, "disable_web_page_preview": True})
+
+
+def save_token(path: Path, token: str, opener: Opener = urllib.request.urlopen) -> TelegramConfig:
+    """Check ``token`` with getMe and, if Telegram knows it, save it as a new,
+    unlinked bot with a fresh pairing code (replacing any earlier bot).
+    Raises ``TelegramError`` if the token is empty or doesn't work."""
+    token = token.strip()
+    if not token or any(c.isspace() for c in token) or "/" in token:
+        raise TelegramError("That doesn't look like a bot token. Copy it from @BotFather.")
+    me = Bot(token, opener).get_me()
+    username = me.get("username", "") if isinstance(me, dict) else ""
+    config = TelegramConfig.new(token, username=username if isinstance(username, str) else "")
+    forget_config(path)  # a new bot starts afresh: Telegram counts updates per bot
+    save_config(path, config)
+    return config
 
 
 # --- What the commands say ---------------------------------------------------
@@ -374,7 +398,7 @@ class TelegramLink:
 
         if not config.paired:
             if command == "start" and chat.get("type") == "private" and self._code_matches(config, rest):
-                config = TelegramConfig(token=config.token, chat_id=chat_id)
+                config = replace(config, chat_id=chat_id, pairing_code="")
                 save_config(self.path, config)
                 log.info("Telegram: linked to its owner's chat")
                 bot.send_message(chat_id, PAIRED)
