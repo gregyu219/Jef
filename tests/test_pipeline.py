@@ -241,7 +241,8 @@ def test_from_go_to_done(w):
     assert "impl-1 finished a turn" in w.last_message("ada")
     assert "## What this does" in last_reply(w.ws, slug, "impl-1")
     assert w.ok("publish", number="1") == (
-        f"Opened PR #20: {PR20}. You can start the next task now, unless it needs this one's code."
+        f"Opened PR #20: {PR20}. Its slot is free: Jef starts the next task with nothing left to wait for "
+        "within a minute. To build one on this task's code now, use `jef task start N --on 1`."
     )
     assert w.publisher.calls[0][:3] == (f"jef/{slug}/task-1", "main", "Show the version")
     task = p.tasks(slug).tasks[0]
@@ -373,7 +374,7 @@ def test_auto_approve_approves_once_the_coordinator_is_idle_and_wakes_it(w):
     assert w.pipeline.phase(w.slug) is Phase.BUILDING
     assert len(w.procs["ada"]) == turns + 1  # woken straight away
     assert "Jef auto-approved the task list" in w.last_message("ada")
-    assert "jef task start 1" in w.last_message("ada")
+    assert "Jef starts every task with nothing left to wait for" in w.last_message("ada")
 
 
 def test_auto_approve_waits_while_there_is_a_problem(w):
@@ -490,7 +491,7 @@ def counting_pr_state(w):
 
 def test_jefs_timer_spots_a_merge_and_wakes_the_coordinator(w):
     p, slug = w.pipeline, w.slug
-    pr_open(w)
+    pr_open(w, titles=("A", "B [after 1]"))
     asked = counting_pr_state(w)
     beat = Heartbeat(p)
     beat.tick_all()
@@ -510,10 +511,11 @@ def test_jefs_timer_spots_a_merge_and_wakes_the_coordinator(w):
     assert goal_fields(w.ws, slug)["last merged"] == PR20
     assert w.agent("impl-1").status is Status.STOPPED
     assert "PR #20 merged (task 1: A)" in w.last_message("ada")
-    assert "start the next task" in w.last_message("ada")
-    assert "| 1 | A | Merged |" in status_path(w.ws, slug).read_text()
-    w.ok("start", number="2")
-    assert w.agent("impl-2").note == "Started by Ada after PR #20 merged"
+    assert "Jef starts the tasks that were waiting for it" in w.last_message("ada")
+    assert "| 1 | A | | Merged |" in status_path(w.ws, slug).read_text()
+    # Task 2 waited for task 1, so Jef starts it in the same round.
+    assert w.agent("impl-2").note == "Started by Jef after PR #20 merged"
+    assert "| 2 | B | 1 | Implementation |" in status_path(w.ws, slug).read_text()
 
 
 def test_jefs_timer_only_asks_about_prs_waiting_for_review(w):
@@ -547,7 +549,9 @@ def test_jefs_timer_finishes_the_project_on_the_last_merge(w):
     p, slug = w.pipeline, w.slug
     pr_open(w, titles=("A",))
     w.pr_states[PR20] = "MERGED"
-    assert p.poll_merges(slug) == ["PR #20 merged (task 1: A). Jef recorded it and stopped impl-1; start the next task."]
+    assert p.poll_merges(slug) == [
+        "PR #20 merged (task 1: A). Jef recorded it and stopped impl-1; Jef starts the tasks that were waiting for it by itself."
+    ]
     assert p.phase(slug) is Phase.DONE
     assert Backlog.load(w.ws.backlog_file).items[0].status is BacklogStatus.DONE
     assert "1 of 1 merged" in status_path(w.ws, slug).read_text()
@@ -685,7 +689,7 @@ def test_the_next_task_starts_once_the_last_pr_is_open(w):
     w.reply("ada", "Started task 1.")
     w.reply("impl-1", READY)
     w.reply("ada", "Reading it.")
-    assert "You can start the next task now" in w.ok("publish", number="1")
+    assert "Jef starts the next task with nothing left to wait for" in w.ok("publish", number="1")
 
     # Nothing has merged, and the limit is 1, yet task 2 starts.
     w.ok("start", number="2")
@@ -751,6 +755,123 @@ def test_a_pr_built_on_a_merged_task_has_no_note(w):
     w.ok("publish", number="2")
     assert not w.publisher.calls[-1][3].startswith("Builds on")
     assert p.stacked(slug) == {2: 1}
+
+
+def test_a_plan_says_which_tasks_each_one_comes_after(w):
+    p, slug = w.pipeline, w.slug
+    research_done(w)
+    said = w.ok("plan", titles=["Add the model", "Add the page [after 1]", "Add the API [After 1]", "Wire it up [after 2, 3]"])
+    assert "2. Add the page (after 1) (Not started)" in said
+    assert "4. Wire it up (after 2, 3) (Not started)" in said
+    assert [(t.title, t.after) for t in p.tasks(slug).tasks] == [
+        ("Add the model", []), ("Add the page", [1]), ("Add the API", [1]), ("Wire it up", [2, 3]),
+    ]
+    assert "| 4 | Wire it up | 2, 3 | Not started |" in (w.ws.project_dir(slug) / "tasks.md").read_text()
+    assert goal_fields(w.ws, slug)["dependencies"] == "yes"
+    assert read_status(w.ws, slug)["jef starts ready tasks"] == "yes"  # so the coordinator knows
+    # Only earlier tasks: that keeps the list free of loops.
+    assert "can't come after task 2" in w.refused("plan", titles=["A [after 2]", "B"])
+    assert "can't come after task 1" in w.refused("plan", titles=["A [after 1]"])
+    assert "can't come after task 9" in w.refused("plan", titles=["A", "B [after 9]"])
+    assert [t.title for t in p.tasks(slug).tasks][0] == "Add the model"  # a refused list changes nothing
+
+
+def test_a_plan_while_building_can_come_after_the_tasks_it_keeps(w):
+    p, slug = w.pipeline, w.slug
+    building(w, titles=("A", "B"))
+    said = w.ok("plan", titles=["C [after 1]", "D [after 2]"])
+    assert "2. C (after 1) (Not started)" in said and "3. D (after 2) (Not started)" in said
+    assert "can't come after task 3" in w.refused("plan", titles=["C [after 3]"])
+
+
+def ready_to_build(w, titles, at_once=1):
+    w.pipeline.set_implementers_at_once(w.slug, at_once)
+    tasks_waiting(w, titles)
+    w.pipeline.approve_tasks(w.slug)
+    w.pipeline.tick(w.slug)  # Ada hears about it
+    w.reply("ada", "Jef starts them.")
+
+
+def statuses(w):
+    return [t.status for t in w.pipeline.tasks(w.slug).tasks]
+
+
+NS, IM, PR, MG = TaskStatus.NOT_STARTED, TaskStatus.IMPLEMENTATION, TaskStatus.PENDING_REVIEW, TaskStatus.MERGED
+
+
+def test_jef_starts_every_ready_task_up_to_the_limit(w):
+    p, slug = w.pipeline, w.slug
+    ready_to_build(w, ("A", "B", "C [after 1]", "D"), at_once=2)
+    assert "Jef starts every task with nothing left to wait for" in w.last_message("ada")
+    assert p.start_ready(slug) == [
+        "Jef started task 1 (impl-1): it doesn't wait for any other task.",
+        "Jef started task 2 (impl-2): it doesn't wait for any other task.",
+    ]
+    assert statuses(w) == [IM, IM, NS, NS]  # task 4 is ready too, but the limit is 2
+    assert w.agent("impl-1").note == "Started by Jef"
+    assert p.start_ready(slug) == []
+    assert "already started" in w.refused("start", number="1")  # Ada racing Jef just gets refused
+
+    # Task 1's PR opens: its slot is free, but task 3 waits for the merge, so task 4 starts.
+    w.reply("impl-1", READY)
+    assert "Jef starts the next task with nothing left to wait for" in w.ok("publish", number="1")
+    assert p.start_ready(slug) == ["Jef started task 4 (impl-4): it doesn't wait for any other task."]
+    assert statuses(w) == [PR, IM, NS, IM]
+
+    # Task 1 merges, but both slots are taken until task 2's PR opens.
+    w.pr_states[PR20] = "MERGED"
+    w.ok("prs")
+    assert p.start_ready(slug) == []
+    w.reply("impl-2", READY)
+    w.ok("publish", number="2")
+    assert p.start_ready(slug) == ["Jef started task 3 (impl-3): the tasks it comes after have merged."]
+    assert statuses(w) == [MG, PR, IM, IM]
+    assert w.agent("impl-3").note == "Started by Jef after PR #20 merged"
+    w.reply("ada", "Published task 2.")  # Ada hears once her turn ends
+    assert "Jef started task 3 (impl-3): the tasks it comes after have merged." in w.last_message("ada")
+
+
+def test_jef_starts_nothing_while_theres_a_problem_or_a_wait(w):
+    p, slug = w.pipeline, w.slug
+    ready_to_build(w, ("A", "B"), at_once=2)
+    w.ok("wait", reason="Which colour?")
+    assert p.start_ready(slug) == [] and statuses(w) == [NS, NS]
+    assert "waiting for you" in p.problem(slug)  # Jef doesn't lift it
+    set_goal_field(w.ws, slug, "Problem", "Something broke")
+    assert p.start_ready(slug) == [] and statuses(w) == [NS, NS]
+    set_goal_field(w.ws, slug, "Problem", "none")
+    assert len(p.start_ready(slug)) == 2
+
+
+def test_jef_doesnt_start_tasks_before_approval(w):
+    tasks_waiting(w)
+    assert w.pipeline.start_ready(w.slug) == []
+    assert statuses(w) == [NS, NS]
+
+
+def test_jef_leaves_older_lists_to_the_coordinator(w):
+    # A list set before tasks.md said what each task waits for: every task
+    # would look ready, so Ada keeps starting them herself.
+    p, slug = w.pipeline, w.slug
+    ready_to_build(w, ("A", "B"), at_once=2)
+    set_goal_field(w.ws, slug, "Dependencies", "")
+    p.write_status(slug)
+    assert "jef starts ready tasks" not in read_status(w.ws, slug)
+    assert p.start_ready(slug) == [] and statuses(w) == [NS, NS]
+    w.ok("start", number="1")
+
+
+def test_the_heartbeat_starts_an_auto_approved_list(w):
+    p, slug = w.pipeline, w.slug
+    p.set_auto_approve(slug, True)
+    p.set_implementers_at_once(slug, 3)
+    research_done(w)
+    w.ok("plan", titles=["A", "B [after 1]", "C"])
+    w.procs["ada"][-1].done = True  # Ada's turn ends with the plan
+    Heartbeat(p).tick_all()
+    assert p.phase(slug) is Phase.BUILDING
+    assert statuses(w) == [IM, NS, IM]
+    assert "| 2 | B | 1 | Not started |" in status_path(w.ws, slug).read_text()
 
 
 def test_overview_shows_implementers_at_once(w):
@@ -912,11 +1033,18 @@ def test_web_implementers_form(w):
 
 def test_web_page_text_follows_implementers_at_once(w):
     c = client(w)
-    building(w)
-    assert "starts the next task as soon as a PR is open" in c.get(f"/projects/{w.slug}").text
+    building(w, titles=("A", "B [after 1]"))
+    page = c.get(f"/projects/{w.slug}").text
+    assert "Jef starts the next ready task by itself" in page
+    assert "<td>B</td><td>1</td><td>Not started</td>" in page  # the After column
     w.pipeline.set_implementers_at_once(w.slug, 2)
     page = c.get(f"/projects/{w.slug}").text
     assert "whichever tasks are ready, up to 2 at once" in page
+
+    # A list set before Jef knew about dependencies: Ada still starts the tasks.
+    set_goal_field(w.ws, w.slug, "Dependencies", "")
+    w.pipeline.set_implementers_at_once(w.slug, 1)
+    assert "Ada starts the next task as soon as a PR is open" in c.get(f"/projects/{w.slug}").text
 
 
 def test_web_wake_button(w):
@@ -1013,7 +1141,7 @@ def test_status_md_follows_the_project_through_every_phase(w):
     w.pipeline.approve_tasks(slug)
     assert read_status(w.ws, slug)["phase"] == "Building"  # written straight away
     w.ok("start", number="1")
-    assert "| 1 | Show it | Implementation | impl-1 | Working | | Started by Ada |" in status_path(w.ws, slug).read_text()
+    assert "| 1 | Show it | | Implementation | impl-1 | Working | | Started by Ada |" in status_path(w.ws, slug).read_text()
     w.reply("impl-1", READY)
     w.ok("publish", number="1")
     w.pr_states[PR20] = "MERGED"
@@ -1078,6 +1206,16 @@ def test_starting_a_task_doesnt_hold_jefs_lock_while_it_fetches(w):
     w.ok("start", number="1")
     assert seen == [True]
     assert w.agent("impl-1")
+
+
+def test_jef_starting_ready_tasks_doesnt_hold_jefs_lock_while_it_fetches(w):
+    tasks_waiting(w)
+    w.pipeline.approve_tasks(w.slug)
+    seen = []
+    new_worktree = w.git.new_worktree
+    w.git.new_worktree = lambda *a: seen.append(lock_is_free(w)) or new_worktree(*a)
+    assert len(w.pipeline.start_ready(w.slug)) == 1
+    assert seen == [True]
 
 
 def test_a_task_isnt_published_twice_at_once(w):

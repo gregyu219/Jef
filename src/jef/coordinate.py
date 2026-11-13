@@ -8,7 +8,7 @@ Jef carries it out and answers within a few seconds, so its rules always apply.
 
     jef overview                      the project at a glance
     jef research start ["brief"]      start the research agent
-    jef tasks set "Task" "Task" …     set the task list
+    jef tasks set "Task" "Task" …     set the task list ("Task [after 1, 2]" waits for tasks 1 and 2 to merge)
     jef tasks approve                 approve the list (after it waited a heartbeat)
     jef task start 1                  start task 1's implementer (it's named impl-1)
     jef task start 2 --on 1           start task 2 on task 1's branch (its PR is open, not merged)
@@ -63,7 +63,7 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
         "brief", nargs="*", help="what to look into (optional)"
     )
     tasks = group("tasks", "the task list")
-    tasks.add_parser("set", help="set the task list, one quoted title per task").add_argument("titles", nargs="*")
+    tasks.add_parser("set", help='set the task list, one quoted title per task; end a title with "[after 1, 2]" if it needs those tasks merged first').add_argument("titles", nargs="*")
     tasks.add_parser("approve", help="approve the task list")
 
     task = group("task", "one task")

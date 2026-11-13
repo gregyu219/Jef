@@ -343,6 +343,7 @@ def create_app(
                 "model_choices": models.CHOICES,
                 "last_checked": ago(flow.now() - checked) if checked is not None else "",
                 "at_once": implementers_at_once(ws, slug),
+                "jef_starts": flow.starts_tasks(slug) if flow else False,
                 "max_at_once": MAX_IMPLEMENTERS_AT_ONCE,
                 "usage": usage,
                 "usage_total": sum(usage.values(), Usage()),

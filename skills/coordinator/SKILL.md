@@ -32,7 +32,7 @@ Run one simple command at a time, with arguments in double quotes.
 | `jef research start "what to look into"` | Start the research agent (the brief is optional). |
 | `jef tasks set "First task" "Second task [after 1]"` | Set the task list, one quoted title per task. Tasks are numbered 1, 2, 3… in that order. End a title with `[after N]` (or `[after 1, 2]`) when it needs those earlier tasks merged first. |
 | `jef tasks approve` | Approve the list yourself (only allowed in some cases; see below). |
-| `jef task start 1` | Start task 1. Its implementer is always named after the task: `impl-1`. Jef refuses if the project already has as many tasks being built as it builds at once. A task whose PR is open doesn't count. |
+| `jef task start 1` | Start task 1 yourself. Usually Jef starts ready tasks by itself (see "3. Build"), so you only need this to stack a task with `--on`, or when Jef can't. Its implementer is always named after the task: `impl-1`. Jef refuses if the project already has as many tasks being built as it builds at once. A task whose PR is open doesn't count. |
 | `jef task start 2 --on 1` | Start task 2 on task 1's branch instead of `main`, for a task that needs task 1's code before it merges. Task 1's PR must be open. |
 | `jef task publish 1` | Have Jef check task 1's commits for secrets, push its branch and open its PR. Run it again later to update the same PR; add `--note "why"` to leave a comment on it. |
 | `jef prs check` | Ask GitHub about every PR: merged, open, conflicts, closed. Records merges. |
@@ -115,7 +115,7 @@ Jef refuses `jef tasks approve` before the list has waited a heartbeat, or if th
 person turned that off for the project.
 
 If `jef overview` shows `Auto approve: on`, Jef approves the list by itself
-as soon as your turn ends, and wakes you with that news: start building then.
+as soon as your turn ends, and wakes you with that news; building starts then.
 So ask any open questions before you run `jef tasks set`.
 
 ### 3. Build
@@ -144,9 +144,29 @@ free, even before the person merges it.
 - If you're not sure two tasks are independent, check the files each one
   touches. Only hold a task back when it really needs another task's code.
 
-When the tasks are approved, start **every** task with nothing left to wait
-for, one `jef task start N` each, up to the limit. If Jef says a task has
-already started or is being started, that's fine: move on to the next.
+**Jef starts the tasks for you.** A task is *ready* when it has nothing left
+to wait for: no `[after]`, or every task it's `[after]` has merged. While
+the project is building, Jef checks every half minute and starts each ready
+task by itself, in number order, up to the limit, and wakes you with "Jef
+started task N (impl-N)". So once the tasks are approved, and after each
+merge or newly opened PR, you don't start anything yourself. Jef doesn't
+start tasks while there's a problem or you're waiting (`jef wait`).
+
+`jef overview` shows `Jef starts ready tasks: yes` for lists set with
+`[after]` in mind. If it doesn't show that line (an older list), start each
+ready task yourself with `jef task start N`, up to the limit; running
+`jef tasks set` again turns it on.
+
+You only run `jef task start` yourself:
+
+- to **stack** a task early: `jef task start N --on M`, once M's PR is open,
+  when waiting for M to merge would hold things up, or
+- when Jef can't start one: an older list (above), or while you're
+  waiting for the person and one task should go ahead anyway (starting a
+  task lifts the wait).
+
+If Jef says a task has already started or is being started, that's fine:
+Jef got there first.
 
 When an implementer finishes a turn, read it (`jef agent read impl-1`). Its
 reply ends with a status line:
@@ -160,10 +180,9 @@ reply ends with a status line:
   `jef overview`'s agents list and in the implementer's first message). If Jef refuses (for
   example uncommitted changes, or something that looks like a secret), send
   the reason to the implementer with `jef agent send`. Once the PR is open,
-  its slot is free: in the same turn, start the next task with nothing left
-  to wait for (`jef task start N`), or stack one that's `[after 1]` on it
-  early (`jef task start N --on 1`) if waiting for the merge would hold
-  things up.
+  its slot is free and Jef starts the next ready task. If a task that's
+  `[after 1]` would be held up waiting for the merge, stack it early
+  yourself: `jef task start N --on 1`.
 - `STATUS: stuck …`: answer it yourself if you can, with `jef agent send`. If it needs
   the person, ask them and run `jef wait "…"`.
 
@@ -176,16 +195,14 @@ Each heartbeat, go through this:
    with `jef agent send impl-N "Heartbeat: carry on; report STATUS: ready with a pr block when it's committed and tested."`
 3. **Open PRs**: Jef checks PRs waiting for review for merges by itself
    every few minutes. When one merges, it records it, stops that
-   implementer and wakes you with "PR #N merged": that means start the next
-   task (see Merged, below). To check for conflicts or closed PRs, run
+   implementer and wakes you with "PR #N merged", then starts the tasks
+   that were waiting for it. To check for conflicts or closed PRs, run
    `jef prs check`.
-   - **Merged**: Jef records it and stops that implementer. Look at what
-     merged (`git fetch`, `git log origin/main`), then decide what's next:
-     start every task that's now unblocked (everything it's `[after]` has
-     merged), one `jef task start N` each, up to the limit; if the tasks that
-     haven't started need changing because of what merged, run `jef tasks set` with the
-     remaining ones first (Jef keeps the started ones); if you need the
-     person, `jef wait`.
+   - **Merged**: Jef records it, stops that implementer and starts the
+     tasks that are now ready. Look at what merged (`git fetch`,
+     `git log origin/main`): if the tasks that haven't started need changing
+     because of it, run `jef tasks set` with the remaining ones (Jef keeps
+     the started ones); if you need the person, `jef wait`.
    - **Merge conflicts**: send the implementer the fix:
      `jef agent send impl-N "Your PR has conflicts with main. Rebase: git fetch origin, then git rebase origin/main, fix each conflict keeping what both sides meant, git add the file, git -c core.editor=true rebase --continue, run the tests, then report STATUS: ready."`
      When it's ready, `jef task publish N --note "Rebased on main to fix merge conflicts."`
@@ -198,8 +215,8 @@ Each heartbeat, go through this:
      If N's PR is open, then `jef task publish N --note "Rebased on task M's latest changes."`
    - **Closed without merging**: ask the person what they want.
    - **Waiting for review**: nothing to do for that PR; the person merges.
-     If there's room under the limit, start any task with nothing left to
-     wait for (or stack one on that PR with `--on`).
+     Jef starts ready tasks in the free slot; stack one on that PR with
+     `--on` only if it shouldn't wait for the merge.
 4. **Everything merged**: `jef prs check` says the project is done. Tell the
    person; Jef stops you after that turn.
 

@@ -25,10 +25,10 @@
     {% elif phase == phases.PLANNING %}
     <p class="next">{{ project.coordinator }} is turning the research into tasks. Jef woke {{ project.coordinator }} when the research finished.</p>
     {% elif phase == phases.APPROVAL %}
-    <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them.{% if coordinator_decides %} If you haven't after one heartbeat (every {{ heartbeat }} minutes), {{ project.coordinator }} may decide.{% else %} {{ project.coordinator }} won't approve them for you: that's turned off under Heartbeat below.{% endif %} Each task becomes one PR.{% if at_once == 1 %} Tasks are built one at a time: {{ project.coordinator }} starts the next as soon as the last one's PR is open.{% else %} Up to {{ at_once }} tasks are built at once: {{ project.coordinator }} starts tasks that don't depend on each other side by side, and starts more as their PRs open.{% endif %} A task that needs another one's code waits until you merge that PR.</p>
+    <p class="next">Look over the tasks below. Ask {{ project.coordinator }} in the chat for changes, or approve them.{% if coordinator_decides %} If you haven't after one heartbeat (every {{ heartbeat }} minutes), {{ project.coordinator }} may decide.{% else %} {{ project.coordinator }} won't approve them for you: that's turned off under Heartbeat below.{% endif %} Each task becomes one PR.{% if jef_starts %}{% if at_once == 1 %} Tasks are built one at a time: Jef starts the next one that's ready as soon as the last one's PR is open.{% else %} Up to {{ at_once }} tasks are built at once: Jef starts every task that's ready side by side, and more as their PRs open.{% endif %} A task is ready once every task in its After column is merged.{% else %}{% if at_once == 1 %} Tasks are built one at a time: {{ project.coordinator }} starts the next as soon as the last one's PR is open.{% else %} Up to {{ at_once }} tasks are built at once: {{ project.coordinator }} starts tasks that don't depend on each other side by side, and starts more as their PRs open.{% endif %} A task that needs another one's code waits until you merge that PR.{% endif %}</p>
     <form method="post" action="/projects/{{ project.slug }}/approve"><button type="submit">Approve tasks and start building</button></form>
     {% elif phase == phases.BUILDING %}
-    <p class="next">{{ project.coordinator }} is running the build: starting each task, nudging its implementer, having Jef open the PR, and checking it on GitHub for merges and conflicts. {{ project.coordinator }} starts {% if at_once == 1 %}the next task{% else %}whichever tasks are ready, up to {{ at_once }} at once{% endif %} as soon as a PR is open, unless it needs that PR's code. Review and merge each PR on GitHub; Jef notices merges within a few minutes.</p>
+    <p class="next">{{ project.coordinator }} is running the build: starting each task, nudging its implementer, having Jef open the PR, and checking it on GitHub for merges and conflicts.{% if jef_starts %} Jef starts {% if at_once == 1 %}the next ready task{% else %}whichever tasks are ready, up to {{ at_once }} at once{% endif %} by itself as soon as there's room: a task is ready once every task in its After column is merged.{% else %} {{ project.coordinator }} starts {% if at_once == 1 %}the next task{% else %}whichever tasks are ready, up to {{ at_once }} at once{% endif %} as soon as a PR is open, unless it needs that PR's code.{% endif %} Review and merge each PR on GitHub; Jef notices merges within a few minutes.</p>
     {% elif phase == phases.DONE %}
     <p class="next">Every task is merged. This project is done.</p>
     {% endif %}
@@ -120,8 +120,8 @@
     <h2>Tasks</h2>
     {% if tasks %}
     <table>
-      <thead><tr><th>#</th><th>Task</th><th>Status</th><th>Agent</th><th>PR</th></tr></thead>
-      <tbody>{% for t in tasks %}<tr><td class="num">{{ t.number }}</td><td>{{ t.title }}</td><td>{{ t.status.value }}</td><td>{{ t.agent }}</td><td>{% if t.pr.startswith("https://") %}<a href="{{ t.pr }}">#{{ t.pr.rsplit("/", 1)[1] }}</a>{% else %}{{ t.pr }}{% endif %}</td></tr>{% endfor %}</tbody>
+      <thead><tr><th>#</th><th>Task</th><th>After</th><th>Status</th><th>Agent</th><th>PR</th></tr></thead>
+      <tbody>{% for t in tasks %}<tr><td class="num">{{ t.number }}</td><td>{{ t.title }}</td><td>{{ t.after|join(", ") }}</td><td>{{ t.status.value }}</td><td>{{ t.agent }}</td><td>{% if t.pr.startswith("https://") %}<a href="{{ t.pr }}">#{{ t.pr.rsplit("/", 1)[1] }}</a>{% else %}{{ t.pr }}{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
     {% else %}
     <p class="empty">No tasks yet. {{ project.coordinator }} proposes them after research.</p>

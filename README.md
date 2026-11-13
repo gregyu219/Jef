@@ -65,7 +65,7 @@ Jef has four levels. Each one hands work to the level below it and keeps track o
 1. **Tell Jef what you want.** Jef adds it to your backlog as *Waiting*. Nothing starts until you confirm, because every running project spends tokens.
 2. **Confirm and connect GitHub.** Jef asks which GitHub repo the code goes to and which account commits it, then creates a named project coordinator.
 3. **Research.** When you say go, the coordinator starts one research agent, which writes `research.md`. The coordinator turns that into `tasks.md` for you to approve. If you haven't approved it after a whole heartbeat, the coordinator may approve or revise it. You can turn that off per project. If you turned on *Auto approve* for the backlog item (its toggle is in the home page's backlog table, and works until the list is approved), Jef approves the list itself as soon as the coordinator has posted it.
-4. **Build.** The coordinator starts one implementation agent per task. It plans tasks in waves, split by the files they touch, so as many as possible can be built side by side, up to the project's *Implementers at once* setting (1 by default). A task that needs another one's code says so in its title, like `[after 1]`. It reads each implementer's replies, nudges it on its heartbeat, has Jef open the PR when it's ready, and checks the PR on GitHub. After a merge it starts the tasks that are now unblocked, revising the ones that are left if what merged changed the picture. If a PR gets merge conflicts, it has the implementer rebase, and Jef pushes the fix to the same PR. The project page shows who started each agent.
+4. **Build.** Each task gets one implementation agent. The coordinator plans tasks in waves, split by the files they touch, so as many as possible can be built side by side, up to the project's *Implementers at once* setting (1 by default). A task that needs another one's code says so in its title, like `[after 1]`, and the task table shows it in its *After* column. Jef starts every task with nothing left to wait for by itself, up to the limit, as soon as there's a free slot or the tasks it's after have merged. The coordinator only starts one itself to stack it on an unmerged task's branch (`--on`), or when Jef can't. It reads each implementer's replies, nudges it on its heartbeat, has Jef open the PR when it's ready, and checks the PR on GitHub. After a merge it revises the tasks that are left if what merged changed the picture. If a PR gets merge conflicts, it has the implementer rebase, and Jef pushes the fix to the same PR. The project page shows who started each agent.
 5. **Review.** You review each PR on GitHub and merge it. If one misses the point, chat with its coordinator by name and it will revise the work or start over.
 
 **Deleting.** Every backlog item and every project has a **Delete** button, whatever state it's in, and asks you to confirm first. Deleting a project, or a backlog item that has one, stops its agents, deletes its local folder (`~/.jef/projects/<slug>/`: the clone, worktrees, chats, tasks and cost history) and removes its backlog row. Its branches and PRs on GitHub stay.
@@ -89,9 +89,9 @@ A coordinator acts with its own `jef` commands, grouped by what they act on. The
 | `jef overview` | The project at a glance (reads the files) |
 | `jef agent read impl-2` | An agent's latest reply (reads the chat) |
 | `jef research start ["brief"]` | Starts the research agent |
-| `jef tasks set "Task" "Task" …` | Sets the task list. While building, it replaces only the tasks that haven't started |
+| `jef tasks set "Task" "Task" …` | Sets the task list. End a title with `[after 1, 2]` if the task needs tasks 1 and 2 merged first; a task can only come after earlier ones. While building, it replaces only the tasks that haven't started |
 | `jef tasks approve` | Approves the list, only after it has waited a heartbeat for you and only if that's allowed for the project |
-| `jef task start N` | Starts task N's implementer, if the project has fewer tasks being built than it builds at once (a task whose PR is open doesn't count). With `--on M`, it builds on task M's branch instead of `main`, once M's PR is open |
+| `jef task start N` | Starts task N's implementer by hand (Jef usually starts ready tasks itself), if the project has fewer tasks being built than it builds at once (a task whose PR is open doesn't count). With `--on M`, it builds on task M's branch instead of `main`, once M's PR is open |
 | `jef agent send impl-2 "…"` | Messages one of its own agents |
 | `jef task publish N [--note …]` | Jef checks the commits for secrets, pushes the branch and opens the PR, or updates the open one (with the note as a comment) |
 | `jef prs check` | Asks GitHub about every PR: merged (recorded, implementer stopped), conflicts, closed |
@@ -109,19 +109,19 @@ A coordinator can't wake itself: each agent is a Claude Code session that only r
 - when you press **Approve**, **Start research**, **Try again** or **Ask the coordinator to check now**,
 - **when Jef auto-approves the task list**: with *Auto approve* on, the half-minute check approves the list once the coordinator has posted it and finished its turn, then wakes it to start building.
 
-Each wake-up says what changed and includes the project's status. On its heartbeat the coordinator nudges implementers that are still working, runs `jef prs check` to check merges and conflicts, and starts every task with nothing left to wait for as soon as a slot is free (a slot frees when a PR opens). A task that needs another one's code is built on that task's branch (`jef task start N --on M`). Heartbeats cost a coordinator turn each, so don't set the interval too short.
+Each wake-up says what changed and includes the project's status. On its heartbeat the coordinator nudges implementers that are still working, and runs `jef prs check` to check merges and conflicts. It doesn't start tasks: Jef does that by itself (see *Jef's timer* below). To get ahead, the coordinator may stack a task that needs another one's code on that task's branch (`jef task start N --on M`) once its PR is open. Heartbeats cost a coordinator turn each, so don't set the interval too short.
 
 Besides that, Jef only reads files: every half minute it saves finished research as `research.md` and updates each project's `status.md`. That costs nothing. **Check status now** on the project page does the same straight away.
 
 To see every project at once, press **Read status** above the Projects table on the home page. It rewrites each project's `status.md` from Jef's own files and shows each project's stage and its coordinator's state. It makes no AI or GitHub calls. You can also read one project's file at `/projects/<slug>/status`, or on its page under Status file.
 
-By default tasks are built **one at a time**. Only tasks being built count: once a task's PR is open, the coordinator can start the next one without waiting for you to merge. Implementers start from the latest `main`, except a task that needs an unmerged task's code: it's **stacked**, built on that task's branch (`jef task start N --on M`). Its PR still targets `main` and says "Builds on #M … Merge that first"; once #M merges, it shows only its own changes. So merge stacked PRs in order. If #M changes in review, the coordinator has the later task rebase onto it. To build faster, raise **Implementers at once** on the project page (up to 5); the coordinator's plan suggests a number, the size of its largest wave. The coordinator then starts every task with nothing left to wait for side by side. More at once means faster progress, but also faster spending and more merge conflicts. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
+By default tasks are built **one at a time**. Only tasks being built count: once a task's PR is open, Jef starts the next ready one without waiting for you to merge. Implementers start from the latest `main`, except a task that needs an unmerged task's code: it's **stacked**, built on that task's branch (`jef task start N --on M`). Its PR still targets `main` and says "Builds on #M … Merge that first"; once #M merges, it shows only its own changes. So merge stacked PRs in order. If #M changes in review, the coordinator has the later task rebase onto it. To build faster, raise **Implementers at once** on the project page (up to 5); the coordinator's plan suggests a number, the size of its largest wave. Jef then starts every task with nothing left to wait for side by side. More at once means faster progress, but also faster spending and more merge conflicts. Each implementer works in its own checkout (a git worktree) on its own branch, `jef/<project>/task-<n>`.
 
 ### The whole loop
 
 Three kinds of program take part. **You** use Jef's web page. **The running Jef** (`jef start`) is the only thing that launches agents, writes the project's files and pushes code. **Agents** (the coordinator, the research agent, implementers) are Claude Code sessions that only run while they answer a message.
 
-**Jef's timer.** This runs inside the running Jef. It never calls Claude to decide anything. A turn only starts when Jef wakes the coordinator, or when the coordinator asks for one.
+**Jef's timer.** This runs inside the running Jef. It never calls Claude to decide anything. A turn only starts when Jef wakes the coordinator, or when the coordinator asks for one. The one thing it starts by itself is a task that's ready: while building, every half minute, it starts each task whose *After* tasks have all merged, in order, up to *Implementers at once*, and tells the coordinator. It doesn't while the project has a problem or the coordinator is waiting for you. Lists set before Jef knew about *After* are left to the coordinator: `jef overview` shows `Jef starts ready tasks: yes` when Jef handles them.
 
 ```mermaid
 flowchart TD
@@ -132,7 +132,7 @@ flowchart TD
     C -- no --> A
     E --> A
 
-    T([Every 30 seconds, for each project]) --> U[Mark finished agents Idle<br/>Save research.md<br/>Update status.md<br/>Check the budget]
+    T([Every 30 seconds, for each project]) --> U[Mark finished agents Idle<br/>Save research.md<br/>Update status.md<br/>Check the budget<br/>Start tasks that are ready]
     U --> V{Coordinator idle?}
     V -- no --> T
     V -- yes --> W{Any of these?<br/>an agent finished a turn<br/>you pressed a button<br/>its heartbeat is due}
@@ -162,12 +162,11 @@ sequenceDiagram
     R-->>Jef: Findings (its turn ends)
     Jef->>Jef: Save research.md
     Jef->>Ada: Wake: research finished
-    Ada->>Jef: jef tasks set "Task 1" "Task 2"
+    Ada->>Jef: jef tasks set "Task 1" "Task 2 [after 1]"
     Ada-->>You: Here's the plan, please approve
     You->>Jef: Approve
     Jef->>Ada: Wake: the person approved
-    Ada->>Jef: jef task start 1
-    Jef->>I: Spawn impl-1 on branch jef/project/task-1
+    Jef->>I: Task 1 is ready: spawn impl-1 on branch jef/project/task-1
 
     loop Until task 1 is ready
         I-->>Jef: Turn ends (STATUS: working)
@@ -190,7 +189,7 @@ sequenceDiagram
         Jef->>GH: State of each PR?
         alt Merged
             Jef->>Jef: Mark task merged, stop impl-1
-            Ada->>Jef: jef task start 2
+            Jef->>Jef: Task 2 is ready: spawn impl-2
         else Merge conflicts
             Ada->>Jef: jef agent send impl-1 "rebase on main"
             Note over I: Rebases, tests, STATUS: ready
@@ -203,7 +202,7 @@ sequenceDiagram
     Note over Jef,Ada: When jef prs check finds every task merged,<br/>the project is Done and Jef stops Ada.
 ```
 
-If an implementer is stuck, or Ada needs a decision, she asks you and runs `jef wait "…"`. The project page then shows what she's waiting for, and heartbeats pause until she starts a task or you press **Try again**.
+If an implementer is stuck, or Ada needs a decision, she asks you and runs `jef wait "…"`. The project page then shows what she's waiting for, and heartbeats (and Jef starting ready tasks) pause until she starts a task or you press **Try again**.
 
 ### How agents hand work back
 

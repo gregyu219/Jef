@@ -6,21 +6,25 @@ Stored in ``projects/<project>/tasks.md`` as a table:
 
     Plan: research.md
 
-    | # | Task | Status | Agent | PR |
-    | --- | --- | --- | --- | --- |
-    | 1 | Set up the project | Merged | impl-1 | #1 |
+    | # | Task | After | Status | Agent | PR |
+    | --- | --- | --- | --- | --- | --- |
+    | 1 | Set up the project | | Merged | impl-1 | #1 |
+    | 2 | Add the to-do list | 1 | Not started | | |
+
+"After" lists the tasks that must merge before a task can start. Older
+lists without the column load as having none.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
 from jef import mdtable
 
-HEADERS = ["#", "Task", "Status", "Agent", "PR"]
+HEADERS = ["#", "Task", "After", "Status", "Agent", "PR"]
 
 
 class TaskStatus(str, Enum):
@@ -47,6 +51,16 @@ class Task:
     status: TaskStatus = TaskStatus.NOT_STARTED
     agent: str = ""
     pr: str = ""
+    after: list[int] = field(default_factory=list)  # tasks that must merge before this one starts
+
+
+def parse_after(value: str) -> list[int]:
+    """[1, 2] from "1, 2"; anything that isn't a number is ignored."""
+    return [int(part) for part in value.replace(",", " ").split() if part.isdigit()]
+
+
+def format_after(numbers: list[int]) -> str:
+    return ", ".join(map(str, numbers))
 
 
 class TaskList:
@@ -86,6 +100,7 @@ class TaskList:
                     status=TaskStatus.parse(status) if status else TaskStatus.NOT_STARTED,
                     agent=cell(row, "agent"),
                     pr=cell(row, "pr"),
+                    after=parse_after(cell(row, "after")),
                 )
             )
         return cls(tasks, doc)
@@ -98,7 +113,7 @@ class TaskList:
     def render(self) -> str:
         self._doc.headers = list(HEADERS)
         self._doc.rows = [
-            [str(t.number), t.title, t.status.value, t.agent, t.pr] for t in self.tasks
+            [str(t.number), t.title, format_after(t.after), t.status.value, t.agent, t.pr] for t in self.tasks
         ]
         return mdtable.render(self._doc)
 

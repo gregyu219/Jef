@@ -14,9 +14,10 @@ and writes it to ``projects/<slug>/status.md``:
     - Implementers at once: 1
     - Updated: 2026-11-11 14:05
 
-    | # | Task | Stage | Agent | Agent status | PR | Note |
-    | --- | --- | --- | --- | --- | --- | --- |
-    | 1 | Show it | Merged | impl-1 | Stopped | https://… | … |
+    | # | Task | After | Stage | Agent | Agent status | PR | Note |
+    | --- | --- | --- | --- | --- | --- | --- | --- |
+    | 1 | Show it | | Merged | impl-1 | Stopped | https://… | … |
+    | 2 | Test it | 1 | Not started | | | | |
 
 The heartbeat rewrites it whenever something in it changes.
 """
@@ -31,13 +32,13 @@ from pathlib import Path
 from jef import mdtable
 from jef.chats import Agent, Status
 from jef.projects import auto_approve, goal_fields, implementers_at_once, load_project
-from jef.tasks import TaskList, TaskStatus
+from jef.tasks import TaskList, TaskStatus, format_after
 from jef.workspace import Workspace
 
 # The Problem field says this when the coordinator asked to wait for you.
 WAITING = "is waiting for you: "
 STATUS_FILE = "status.md"
-HEADERS = ["#", "Task", "Stage", "Agent", "Agent status", "PR", "Note"]
+HEADERS = ["#", "Task", "After", "Stage", "Agent", "Agent status", "PR", "Note"]
 UPDATED = "- Updated:"
 NOTE_LIMIT = 160
 
@@ -149,6 +150,8 @@ def render_status(ws: Workspace, slug: str, agents: list[Agent], now: datetime |
             f"- Auto approve: {'on' if auto_approve(ws, slug) else 'off'}",
             # Tasks built on another task's unmerged branch, so the coordinator knows who to rebase.
             *([f"- Stacked: {_one_line(fields['stacked'])}"] if fields.get("stacked") else []),
+            # The list says what each task waits for, so Jef starts ready tasks itself (Pipeline.start_ready).
+            *(["- Jef starts ready tasks: yes"] if fields.get("dependencies", "").lower() == "yes" else []),
             f"{UPDATED} {stamp}",
             "",
         ]
@@ -160,6 +163,7 @@ def render_status(ws: Workspace, slug: str, agents: list[Agent], now: datetime |
             doc.rows.append([
                 str(t.number),
                 t.title,
+                format_after(t.after),
                 t.status.value,
                 t.agent,
                 agent.status.value if agent else "",
