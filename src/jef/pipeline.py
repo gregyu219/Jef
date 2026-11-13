@@ -479,7 +479,21 @@ class Pipeline:
             self.write_status(slug)
             return "The tasks are approved. Start the first with `jef task start 1`."
 
-    def start_task(self, slug: str, number: int, by: str) -> str:
+    def stacked(self, slug: str) -> dict[int, int]:
+        """Which tasks were built on another task's unmerged branch, from
+        goal.md's ``Stacked`` field ("2 on 1, 3 on 2"): {2: 1, 3: 2}."""
+        found = {}
+        for part in goal_fields(self.workspace, slug).get("stacked", "").split(","):
+            words = part.split()
+            if len(words) == 3 and words[1] == "on" and words[0].isdigit() and words[2].isdigit():
+                found[int(words[0])] = int(words[2])
+        return found
+
+    def _set_stacked(self, slug: str, number: int, on: int) -> None:
+        pairs = {**self.stacked(slug), number: on}
+        set_goal_field(self.workspace, slug, "Stacked", ", ".join(f"{n} on {m}" for n, m in sorted(pairs.items())))
+
+    def start_task(self, slug: str, number: int, by: str, on: int | None = None) -> str:
         with self.chats.lock:
             if self.phase(slug) is not Phase.BUILDING:
                 raise PipelineError("The tasks haven't been approved yet.")
@@ -494,23 +508,40 @@ class Pipeline:
                 raise PipelineError(f"Task {number} has already started ({task.status.value}).")
             if (slug, number) in self._in_flight:
                 raise PipelineError(f"Task {number} is already being started.")
+            under = None
+            if on is not None:
+                under = next((t for t in tasks.tasks if t.number == on), None)
+                if under is None or on == number:
+                    raise PipelineError(f"There's no other task {on} to build on. See `jef overview`.")
+                if under.status is TaskStatus.MERGED:
+                    raise PipelineError(f"Task {on} is already merged. Start task {number} without --on; it builds on main.")
+                if under.status is not TaskStatus.PENDING_REVIEW:
+                    raise PipelineError(
+                        f"Task {on} has no open PR yet ({under.status.value}). "
+                        f"Publish it first, then start task {number} on it."
+                    )
             starting = [n for s, n in self._in_flight if s == slug]
             busy = [t.number for t in tasks.tasks if t.status in BUILDING] + starting
             limit = self.implementers_at_once(slug)
             if len(busy) >= limit:
                 raise PipelineError(_at_limit(sorted(busy), limit))
             merged = goal_fields(self.workspace, slug).get("last merged", "")
-            note = f"Started by {by}" + (f" after {pr_label(merged)} merged" if merged else "")
+            if under is not None:
+                note = f"Started by {by} on task {on}'s branch ({pr_label(under.pr)} isn't merged yet)"
+            else:
+                note = f"Started by {by}" + (f" after {pr_label(merged)} merged" if merged else "")
             self._in_flight.add((slug, number))
         try:
             # git fetch and worktree add, without the lock.
-            branch, base, work = self._prepare_worktree(slug, task)
+            branch, base, work = self._prepare_worktree(slug, task, under)
             with self.chats.lock:
                 tasks = self.tasks(slug)
                 task = next((t for t in tasks.tasks if t.number == number), None)
                 if task is None or task.status is not TaskStatus.NOT_STARTED:
                     raise PipelineError(f"Task {number} changed while Jef was getting it ready. See `jef overview`.")
-                name = self._start_implementer(slug, tasks, task, note, branch, base, work)
+                name = self._start_implementer(slug, tasks, task, note, branch, base, work, under)
+                if under is not None:
+                    self._set_stacked(slug, number, under.number)
                 if problem and self.problem(slug) == problem:
                     set_goal_field(self.workspace, slug, "Problem", "none")  # it was only waiting for this
                 self.write_status(slug)
@@ -519,7 +550,13 @@ class Pipeline:
         finally:
             with self.chats.lock:
                 self._in_flight.discard((slug, number))
-        return f"Started {name} on task {number}. Jef wakes you when it finishes a turn."
+        said = f"Started {name} on task {number}"
+        if under is not None:
+            said += (
+                f", on task {on}'s branch, so {pr_label(under.pr)} has to merge first. If task {on} changes "
+                f"before it merges, have {name} rebase onto it"
+            )
+        return said + ". Jef wakes you when it finishes a turn."
 
     def send_to(self, slug: str, name: str, message: str, by: str) -> str:
         """Message one of the coordinator's agents: a nudge, feedback, a fix."""
@@ -582,6 +619,13 @@ class Pipeline:
             if replaced:
                 # Jef only opens a new PR when the old one was closed; link it.
                 body = f"Replaces {replaced}, which was closed without merging.\n\n" + body
+            under = next((t for t in tasks.tasks if t.number == self.stacked(slug).get(number)), None)
+            if under is not None and under.status is not TaskStatus.MERGED and under.pr:
+                # It's opened against main, so until that merges it shows the other task's commits too.
+                body = (
+                    f"Builds on {under.pr} (task {under.number}), which isn't merged yet. "
+                    "Merge that first; this PR then shows only its own changes.\n\n" + body
+                )
             repo = self.folder(slug) / "repo"
             try:
                 url = self.publisher.publish(folder, branch, self.git.default_branch(repo), title, body)
@@ -719,19 +763,24 @@ class Pipeline:
                 item.status = BacklogStatus.DONE
         backlog.save(self.workspace.backlog_file)
 
-    def _prepare_worktree(self, slug: str, task: Task) -> tuple[str, str, Path]:
-        """The task's branch and working folder (fetching first). Network, so
-        callers don't hold the lock."""
+    def _prepare_worktree(self, slug: str, task: Task, on: Task | None = None) -> tuple[str, str, Path]:
+        """The task's branch, the main branch's name and the working folder
+        (fetching first). The checkout is made from the latest main, or from
+        task ``on``'s published branch when it's stacked. Network, so callers
+        don't hold the lock."""
         repo = self.folder(slug) / "repo"
-        base = self.git.default_branch(repo)
+        main = self.git.default_branch(repo)
+        # Publishing pushed task on's branch, so origin has the reviewed version.
+        base = self._branch(slug, on) if on is not None else main
         branch = self._branch(slug, task)
         work = self.folder(slug) / "work" / f"impl-{task.number}"
         if not work.exists():
             self.git.new_worktree(repo, work, branch, base)
-        return branch, base, work
+        return branch, main, work
 
     def _start_implementer(
-        self, slug: str, tasks: TaskList, task: Task, note: str, branch: str, base: str, work: Path
+        self, slug: str, tasks: TaskList, task: Task, note: str, branch: str, main: str, work: Path,
+        on: Task | None = None,
     ) -> str:
         name = f"impl-{task.number}"
         project = load_project(self.workspace, slug)
@@ -739,7 +788,7 @@ class Pipeline:
             slug,
             name,
             Role.IMPLEMENTER,
-            self._implementer_message(slug, task, branch, base),
+            self._implementer_message(slug, task, branch, main, on),
             work,
             parent=project.coordinator_agent,
             instructions=skills.load("implementer"),
@@ -800,11 +849,19 @@ class Pipeline:
                 raise PipelineError("Give the task's number, like 2.")
             return int(value)
 
+        def on() -> int | None:
+            value = str(args.get("on", "") or "").strip()
+            if not value:
+                return None
+            if not value.isdigit():
+                raise PipelineError("Give the number of the task to build on, like --on 1.")
+            return int(value)
+
         handlers: dict[str, Callable[[], str]] = {
             "research": lambda: self.start_research(slug, str(args.get("brief", "")), by=by),
             "plan": lambda: self.plan(slug, [str(t) for t in args.get("titles", [])], by=by),
             "approve": lambda: self.approve_tasks(slug, by=by),
-            "start": lambda: self.start_task(slug, number(), by=by),
+            "start": lambda: self.start_task(slug, number(), by=by, on=on()),
             "send": lambda: self.send_to(slug, str(args.get("agent", "")), str(args.get("message", "")), by=by),
             "stop": lambda: self.stop_agent(slug, str(args.get("agent", "")), by=by),
             "wait": lambda: self.wait_for_person(slug, str(args.get("reason", "")), by=by),
@@ -940,12 +997,22 @@ class Pipeline:
             "complete findings in the format your instructions give."
         )
 
-    def _implementer_message(self, slug: str, task: Task, branch: str, base: str) -> str:
+    def _implementer_message(self, slug: str, task: Task, branch: str, base: str, on: Task | None = None) -> str:
         project = load_project(self.workspace, slug)
+        if on is None:
+            made_from = f"made from the latest `{base}`."
+        else:
+            under = self._branch(slug, on)
+            made_from = (
+                f"made from task {on.number}'s branch, `{under}`, not `{base}`. Task {on.number} "
+                f"({on.title}) isn't merged yet: its PR is waiting for review. Build on its code, "
+                f"but don't change it; that's task {on.number}'s job. If your coordinator says task "
+                f"{on.number} changed, rebase onto `origin/{under}` (or onto `origin/{base}` once it's merged)."
+            )
         return (
             f"You're the implementation agent for task {task.number}: {task.title}\n\n"
             f"Your working folder is a checkout of the repo on your own branch, `{branch}`, "
-            f"made from the latest `{base}`. Your coordinator is {project.coordinator}.\n\n"
+            f"{made_from} Your coordinator is {project.coordinator}.\n\n"
             f"## goal.md\n\n{self._goal(slug)}\n"
             f"## research.md\n\n{_tail(self.research(slug))}\n\n"
             "## All tasks, so you know what's yours and what isn't\n\n"

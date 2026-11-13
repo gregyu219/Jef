@@ -695,6 +695,64 @@ def test_the_next_task_starts_once_the_last_pr_is_open(w):
     assert "Task 2 is still being built" in w.refused("start", number="3")
 
 
+def test_a_dependent_task_builds_on_an_unmerged_tasks_branch(w):
+    p, slug = w.pipeline, w.slug
+    tasks_waiting(w, ("A", "B", "C"))
+    p.approve_tasks(slug)
+    p.tick(slug)
+    w.ok("start", number="1")
+    # Task 1 has no PR yet, so there's nothing reviewed to build on.
+    assert "Task 1 has no open PR yet (Implementation)" in w.refused("start", number="2", on="1")
+    assert "no other task 9" in w.refused("start", number="2", on="9")
+    assert "no other task 2" in w.refused("start", number="2", on="2")
+    assert "--on 1" in w.refused("start", number="2", on="one")
+    w.reply("ada", "Started task 1.")
+    w.reply("impl-1", READY)
+    w.reply("ada", "Reading it.")
+    w.ok("publish", number="1")
+
+    said = w.ok("start", number="2", on="1")
+    assert "on task 1's branch, so PR #20 has to merge first" in said
+    assert w.git.worktrees[-1] == (f"jef/{slug}/task-2", f"jef/{slug}/task-1")
+    assert w.agent("impl-2").note == "Started by Ada on task 1's branch (PR #20 isn't merged yet)"
+    assert goal_fields(w.ws, slug)["stacked"] == "2 on 1"
+    w.pipeline.write_status(slug)
+    assert read_status(w.ws, slug)["stacked"] == "2 on 1"
+    first =w.last_message("impl-2")
+    assert f"made from task 1's branch, `jef/{slug}/task-1`, not `main`" in first
+    assert "don't change it" in first and f"rebase onto `origin/jef/{slug}/task-1`" in first
+
+    # Its PR still targets main, and says which PR to merge first.
+    w.reply("impl-2", READY)
+    w.reply("ada", "Reading it.")
+    w.ok("publish", number="2")
+    branch, base, _, body = w.publisher.calls[-1]
+    assert branch == f"jef/{slug}/task-2" and base == "main"
+    assert body.startswith(f"Builds on {PR20} (task 1), which isn't merged yet. Merge that first")
+
+    # Once task 1 has merged, building on it is just building on main.
+    w.pr_states[PR20] = "MERGED"
+    w.ok("prs")
+    assert "already merged. Start task 3 without --on" in w.refused("start", number="3", on="1")
+    w.ok("start", number="3")
+    assert w.git.worktrees[-1] == (f"jef/{slug}/task-3", "main")
+    assert "made from the latest `main`" in w.last_message("impl-3")
+    assert goal_fields(w.ws, slug)["stacked"] == "2 on 1"
+
+
+def test_a_pr_built_on_a_merged_task_has_no_note(w):
+    p, slug = w.pipeline, w.slug
+    pr_open(w)
+    w.ok("start", number="2", on="1")
+    w.pr_states[PR20] = "MERGED"
+    w.ok("prs")
+    w.reply("impl-2", READY)
+    w.reply("ada", "Reading it.")
+    w.ok("publish", number="2")
+    assert not w.publisher.calls[-1][3].startswith("Builds on")
+    assert p.stacked(slug) == {2: 1}
+
+
 def test_overview_shows_implementers_at_once(w):
     w.pipeline.set_implementers_at_once(w.slug, 4)
     w.pipeline.write_status(w.slug)
@@ -786,6 +844,7 @@ def test_request_args():
     assert coordinate.request_args(parse("tasks", "set", "A", "B")) == ("plan", {"titles": ["A", "B"]})
     assert coordinate.request_args(parse("tasks", "approve")) == ("approve", {})
     assert coordinate.request_args(parse("task", "start", "1")) == ("start", {"number": "1"})
+    assert coordinate.request_args(parse("task", "start", "2", "--on", "1")) == ("start", {"number": "2", "on": "1"})
     assert coordinate.request_args(parse("task", "publish", "2", "--note", "rebased")) == ("publish", {"number": "2", "note": "rebased"})
     assert coordinate.request_args(parse("prs", "check")) == ("prs", {})
     assert coordinate.request_args(parse("agent", "send", "impl-2", "carry", "on")) == ("send", {"agent": "impl-2", "message": "carry on"})

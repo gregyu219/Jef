@@ -11,6 +11,7 @@ Jef carries it out and answers within a few seconds, so its rules always apply.
     jef tasks set "Task" "Task" …     set the task list
     jef tasks approve                 approve the list (after it waited a heartbeat)
     jef task start 1                  start task 1's implementer (it's named impl-1)
+    jef task start 2 --on 1           start task 2 on task 1's branch (its PR is open, not merged)
     jef task publish 1 [--note …]     push task 1's branch and open or update its PR
     jef prs check                     ask GitHub about every PR (merged? conflicts?)
     jef agent read impl-1             an agent's latest reply
@@ -66,7 +67,9 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
     tasks.add_parser("approve", help="approve the task list")
 
     task = group("task", "one task")
-    task.add_parser("start", help="start the task's implementer").add_argument("number")
+    start = task.add_parser("start", help="start the task's implementer")
+    start.add_argument("number")
+    start.add_argument("--on", default="", help="build on this unmerged task's branch instead of main")
     publish = task.add_parser("publish", help="push the task's branch and open or update its PR")
     publish.add_argument("number")
     publish.add_argument("--note", default="", help="when updating a PR, a comment saying why")
@@ -93,7 +96,7 @@ def request_args(args: argparse.Namespace) -> tuple[str, dict]:
     if word == "tasks":
         return ("plan", {"titles": list(args.titles)}) if action == "set" else ("approve", {})
     if word == "task":
-        extra = {"note": args.note} if action == "publish" else {}
+        extra = {"note": args.note} if action == "publish" else {"on": args.on} if args.on else {}
         return action, {"number": args.number, **extra}  # start, publish
     if word == "prs":
         return "prs", {}
