@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -12,9 +11,10 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from jef import claude, jefchat, models
+from jef import actions, claude, jefchat, models
+from jef.actions import ActionError, ProjectSummary, split_coordinator  # noqa: F401  (still importable from here)
 from jef.backlog import Backlog, BacklogStatus
-from jef.chats import Agent, Chats, ChatError, Role, Status, load_roster
+from jef.chats import Chats, ChatError, Role, Status, load_roster
 from jef.claude import ClaudeCheck
 from jef.github import GitHubStatus, github_status
 from jef.pipeline import Phase, Pipeline, PipelineError, pr_label
@@ -23,21 +23,13 @@ from jef.projects import (
     MAX_IMPLEMENTERS_AT_ONCE,
     DeleteError,
     StartError,
-    auto_approve,
     delete_project,
     gh_clone,
-    goal_fields,
     implementers_at_once,
-    known_repos,
-    load_project,
-    parse_repo,
     project_for_backlog_item,
-    projects_on_repo,
     set_goal_field,
-    start_project,
-    used_backlog_numbers,
 )
-from jef.status import NEEDS_REVIEW, Attention, needs_you, project_phase, read_status, status_path, write_status
+from jef.status import NEEDS_REVIEW, status_path, write_status
 from jef.tasks import TaskList, TaskStatus
 from jef.usage import (
     Usage,
@@ -47,7 +39,6 @@ from jef.usage import (
     format_rate,
     format_tokens,
     latest_plan_usage,
-    project_total,
     project_usage,
 )
 from jef.workspace import Workspace
@@ -80,113 +71,6 @@ MODEL_FORM: dict[Role, tuple[str, str]] = {
     Role.RESEARCH: ("research", "Research"),
     Role.IMPLEMENTER: ("implementer", "Implementers"),
 }
-
-
-@dataclass
-class ProjectSummary:
-    slug: str
-    name: str
-    total: int
-    counts: dict[TaskStatus, int]
-    usage: Usage = Usage()
-    # From status.md, so the home page needs no LLM call to show them.
-    phase: str = ""
-    coordinator: str = ""
-    coordinator_status: str = ""
-    problem: str = ""
-
-    @property
-    def merged(self) -> int:
-        return self.counts[TaskStatus.MERGED]
-
-
-def split_coordinator(value: str) -> tuple[str, str]:
-    """"Katherine (Idle)" -> ("Katherine", "Idle"); "none" -> ("", "")."""
-    value = value.strip()
-    if not value or value == "none":
-        return "", ""
-    name, paren, rest = value.rpartition(" (")
-    if paren and rest.endswith(")"):
-        return name, rest[:-1]
-    return value, ""
-
-
-def summarize_projects(ws: Workspace) -> list[ProjectSummary]:
-    summaries = []
-    for slug in ws.project_slugs():
-        tasks = TaskList.load(ws.project_dir(slug) / "tasks.md")
-        status = read_status(ws, slug)
-        coordinator, coordinator_status = split_coordinator(status.get("coordinator", ""))
-        problem = status.get("problem", "")
-        summaries.append(
-            ProjectSummary(
-                slug=slug,
-                name=tasks.title or slug,
-                total=len(tasks.tasks),
-                counts=tasks.counts(),
-                usage=project_total(ws, slug),
-                phase=status.get("phase", ""),
-                coordinator=coordinator,
-                coordinator_status=coordinator_status,
-                problem="" if problem == "none" else problem,
-            )
-        )
-    return summaries
-
-
-def refresh_statuses(ws: Workspace, roster: Callable[[str], list[Agent]] | None = None) -> int:
-    """Rewrite every project's status.md from its files. ``roster`` gives a
-    project's agents (Chats.refresh when Claude Code works); without it the
-    saved agents.md is read. No LLM or GitHub call. Returns how many changed."""
-    changed = 0
-    for slug in ws.project_slugs():
-        agents = roster(slug) if roster else load_roster(ws, slug)
-        changed += write_status(ws, slug, agents)
-    return changed
-
-
-def backlog_projects(ws: Workspace) -> dict[int, str]:
-    """Backlog item number -> the slug of the project started from it."""
-    found = {}
-    for slug in ws.project_slugs():
-        number = goal_fields(ws, slug).get("backlog item", "").lstrip("#").strip()
-        if number.isdigit():
-            found[int(number)] = slug
-    return found
-
-
-def backlog_attention(ws: Workspace, backlog: Backlog) -> dict[int, tuple[str, Attention]]:
-    """For each in-progress backlog item waiting on you: (its project's slug,
-    what it needs). Read from the project files on every page load, so it's
-    never stale and costs no LLM or GitHub call."""
-    slugs = backlog_projects(ws)
-    found = {}
-    for item in backlog.items:
-        slug = slugs.get(item.number)
-        if item.status is not BacklogStatus.IN_PROGRESS or slug is None:
-            continue
-        attention = needs_you(ws, slug, load_roster(ws, slug))
-        if attention is not None:
-            found[item.number] = (slug, attention)
-    return found
-
-
-def backlog_auto_approve(ws: Workspace, backlog: Backlog) -> dict[int, tuple[bool, bool]]:
-    """For each backlog item: (whether Auto approve is on, whether it can
-    still be changed). A started item reads its project's goal.md, the
-    source of truth; a Waiting one reads its backlog row. It stops being
-    changeable once the item is done or its task list is already approved."""
-    slugs = backlog_projects(ws)
-    found = {}
-    for item in backlog.items:
-        slug = slugs.get(item.number)
-        if slug is None:
-            found[item.number] = (item.auto_approve, item.status is not BacklogStatus.DONE)
-            continue
-        phase = project_phase(ws, slug, load_roster(ws, slug))
-        changeable = item.status is not BacklogStatus.DONE and phase not in (Phase.BUILDING, Phase.DONE, Phase.STOPPED)
-        found[item.number] = (auto_approve(ws, slug), changeable)
-    return found
 
 
 def ago(seconds: float) -> str:
@@ -236,23 +120,14 @@ def create_app(
     get_pipeline = runtime.get_pipeline
 
     def known(slug: str):
-        return load_project(ws, slug) if slug in ws.project_slugs() else None
-
-    def coordinator_pages() -> dict[str, str]:
-        """Coordinator name -> its project's slug, for linking from the backlog."""
-        pages = {}
-        for slug in ws.project_slugs():
-            project = load_project(ws, slug)
-            if project and project.coordinator:
-                pages[project.coordinator] = slug
-        return pages
+        return actions.known_project(ws, slug)
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request, error: str = "", status: str = ""):
         backlog = Backlog.load(ws.backlog_file)
         jef_runner = get_jef_chats()
         jef_agent = jefchat.agent(jef_runner) if jef_runner else None
-        projects = summarize_projects(ws)
+        projects = actions.summarize_projects(ws)
         now = datetime.now(timezone.utc)
         plan = latest_plan_usage(ws)
         return TEMPLATES.TemplateResponse(
@@ -273,10 +148,10 @@ def create_app(
                 "statuses": list(TaskStatus),
                 "workspace": ws.root,
                 "claude": runtime.claude,
-                "coordinator_pages": coordinator_pages(),
-                "attention": backlog_attention(ws, backlog),
-                "item_projects": backlog_projects(ws),
-                "auto_approve": backlog_auto_approve(ws, backlog),
+                "coordinator_pages": actions.coordinators(ws),
+                "attention": actions.backlog_attention(ws, backlog),
+                "item_projects": actions.backlog_projects(ws),
+                "auto_approve": actions.backlog_auto_approve(ws, backlog),
                 "needs_review": NEEDS_REVIEW,
                 "waiting": BacklogStatus.WAITING,
                 "error": error,
@@ -293,7 +168,7 @@ def create_app(
             for slug in ws.project_slugs():
                 flow.write_status(slug)
         else:
-            refresh_statuses(ws)
+            actions.refresh_statuses(ws)
         return RedirectResponse("/?status=read#projects", status_code=303)
 
     @app.get("/projects/{slug}/status", response_class=PlainTextResponse)
@@ -329,16 +204,14 @@ def create_app(
 
     @app.post("/backlog")
     def add_backlog_item(feature: str = Form("")):
-        backlog = Backlog.load(ws.backlog_file)
         try:
-            backlog.add(feature, reserved=used_backlog_numbers(ws))
+            actions.add_backlog_item(ws, feature)
         except ValueError:
             return RedirectResponse("/?error=empty", status_code=303)
-        backlog.save(ws.backlog_file)
         return RedirectResponse("/", status_code=303)
 
     def find_item(number: int):
-        return next((i for i in Backlog.load(ws.backlog_file).items if i.number == number), None)
+        return actions.find_backlog_item(ws, number)
 
     def remove_project(slug: str) -> None:
         """Stop the project's agents, delete its folder and its backlog row."""
@@ -400,12 +273,7 @@ def create_app(
         item = find_item(number)
         if item is None:
             return RedirectResponse("/", status_code=303)
-        repos = known_repos(ws)
-        chosen = repo or (repos[0] if repos else "")
-        try:
-            others = projects_on_repo(ws, parse_repo(chosen)) if chosen else []
-        except StartError:
-            others = []
+        choice = actions.repo_choice(ws, repo)
         return TEMPLATES.TemplateResponse(
             request,
             "start.html",
@@ -415,9 +283,9 @@ def create_app(
                 "started": item.status is not BacklogStatus.WAITING,
                 "github": github_check(),
                 "claude_ok": get_chats() is not None,
-                "repo": chosen,
-                "known_repos": repos,
-                "others": others,
+                "repo": choice.repo,
+                "known_repos": choice.known,
+                "others": choice.others,
                 "error": error,
             },
         )
@@ -433,11 +301,8 @@ def create_app(
 
         if confirm != "yes":
             return again("Tick the box to confirm you want to start.")
-        runner = get_chats()
-        if runner is None:
-            return again("Claude Code isn't working yet, so no agent can start. See Settings.")
         try:
-            project = start_project(ws, number, repo, runner, clone=clone, choose_name=choose_name)
+            project = actions.start_backlog_item(ws, number, repo, get_chats(), clone=clone, choose_name=choose_name)
         except StartError as err:
             return again(str(err))
         return RedirectResponse(f"/projects/{project.slug}", status_code=303)
@@ -577,20 +442,14 @@ def create_app(
 
     @app.post("/projects/{slug}/message")
     def message_coordinator(slug: str, message: str = Form("")):
-        project = known(slug)
-        runner = get_chats()
-        if project is None:
-            return RedirectResponse("/", status_code=303)
-        if not message.strip():
-            return RedirectResponse(f"/projects/{slug}?error=empty", status_code=303)
-        if runner is None:
-            return RedirectResponse(f"/projects/{slug}?error=claude", status_code=303)
         try:
-            runner.send(slug, project.coordinator_agent, message.strip())
+            actions.message_coordinator(ws, get_chats(), slug, message)
+        except ActionError as err:
+            if err.reason == "unknown":
+                return RedirectResponse("/", status_code=303)
+            return RedirectResponse(f"/projects/{slug}?error={err.reason}", status_code=303)
         except ChatError as err:
-            said = str(err)
-            reason = "busy" if "still working" in said else "budget" if "budget" in said else "stopped"
-            return RedirectResponse(f"/projects/{slug}?error={reason}", status_code=303)
+            return RedirectResponse(f"/projects/{slug}?error={actions.chat_error_reason(err)}", status_code=303)
         return RedirectResponse(f"/projects/{slug}", status_code=303)
 
     @app.post("/projects/{slug}/stop")
