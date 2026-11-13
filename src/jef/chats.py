@@ -381,12 +381,14 @@ class Chats:
         folder: str | Path,
         parent: str = "",
         instructions: str = "",
+        sender: str = "",
     ) -> Agent:
-        """Start a new agent with its first message."""
+        """Start a new agent with its first message. ``sender`` is who it's
+        from; by default the parent, or "you"."""
         with self.lock:
-            return self._spawn(project, name, role, message, folder, parent, instructions)
+            return self._spawn(project, name, role, message, folder, parent, instructions, sender)
 
-    def _spawn(self, project, name, role, message, folder, parent, instructions) -> Agent:
+    def _spawn(self, project, name, role, message, folder, parent, instructions, sender="") -> Agent:
         if not NAME_PATTERN.match(name):
             raise ChatError("Agent names use lowercase letters, numbers and dashes, like impl-2.")
         if not Path(folder).is_dir():
@@ -401,7 +403,7 @@ class Chats:
         agents.append(agent)
         save_roster(self.workspace, project, agents)
         self._run_turn(
-            project, agent, message, sender=parent or "you", first_turn=True, instructions=instructions, budget_left=left
+            project, agent, message, sender=sender or parent or "you", first_turn=True, instructions=instructions, budget_left=left
         )
         return agent
 

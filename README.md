@@ -55,6 +55,8 @@ Things it can't help with:
 2. In Jef, open Settings, paste the token under Telegram and press Save. Jef checks it with Telegram, then shows a pairing code.
 3. Send the bot `/start <code>` from your own account (or use the link Settings shows). That chat becomes the only one the bot answers. Send `/help` to see what it can do.
 
+Anything you type that isn't a command goes to Jef's front desk, the same chat as on the home page, and Jef's answer is sent back to you when it's ready. `/reset` starts that chat over. `/add <feature>` adds an item to the backlog; start it from the home page. `/status` and `/backlog` show how things stand without any AI call.
+
 Jef asks Telegram for new messages itself (long polling), so nothing on your computer is opened to the internet, and the bot only answers while Jef is running. The token is kept in a file only you can read, outside `~/.jef` so no agent can read it: `~/Library/Application Support/jef/telegram.json` on a Mac. Set `JEF_SECRETS` to keep it somewhere else. Settings never shows the token again; **Forget this bot** deletes it. Telegram messages aren't end-to-end encrypted, so project details you see there pass through Telegram's servers.
 
 ## How it works

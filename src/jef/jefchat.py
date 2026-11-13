@@ -78,8 +78,9 @@ def agent(chats: Chats) -> Agent | None:
     return next((a for a in chats.refresh(HOME) if a.name == NAME), None)
 
 
-def send(chats: Chats, ws: Workspace, message: str) -> Agent:
-    """Message Jef. The first message starts the session with the briefing."""
+def send(chats: Chats, ws: Workspace, message: str, sender: str = "you") -> Agent:
+    """Message Jef, as ``sender``. The first message starts the session with
+    the briefing."""
     with chats.lock:
         if agent(chats) is None:
             ws.root.mkdir(parents=True, exist_ok=True)
@@ -90,8 +91,9 @@ def send(chats: Chats, ws: Workspace, message: str) -> Agent:
                 context_message(ws) + "\n\nThe person says: " + message,
                 ws.root,
                 instructions=skills.load("jef"),
+                sender=sender,
             )
-        return chats.send(HOME, NAME, message)
+        return chats.send(HOME, NAME, message, sender=sender)
 
 
 def reset(chats: Chats, ws: Workspace, now: Callable[[], datetime] = datetime.now) -> Agent:
